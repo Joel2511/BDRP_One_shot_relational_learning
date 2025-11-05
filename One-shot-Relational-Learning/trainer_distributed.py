@@ -194,9 +194,6 @@ class Trainer(object):
             query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
             false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
 
-            # GPU memory print
-            print(f"Batch {self.batch_nums} - GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f} MB, "
-                  f"cached: {torch.cuda.memory_reserved()/1024**2:.2f} MB")
 
             if self.no_meta:
                 query_scores = self.matcher(query, support)
