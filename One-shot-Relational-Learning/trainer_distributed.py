@@ -1,3 +1,4 @@
+# trainer1_fixed.py
 import json
 import logging
 import numpy as np
@@ -6,7 +7,6 @@ import torch.nn.functional as F
 
 from collections import defaultdict, deque
 from torch import optim
-from torch.autograd import Variable
 from tqdm import tqdm
 import os
 import random
@@ -22,8 +22,13 @@ class Trainer(object):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
-        self.meta = not self.no_meta
+        # device: prefer GPUs if available
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # improve cuDNN perf for fixed-size inputs
+        if torch.cuda.is_available():
+            torch.backends.cudnn.benchmark = True
 
+        self.meta = not self.no_meta
         use_pretrain = not self.random_embed
 
         logging.info('LOADING SYMBOL ID AND SYMBOL EMBEDDING')
@@ -36,17 +41,28 @@ class Trainer(object):
 
         self.num_symbols = len(self.symbol2id.keys()) - 1
         self.pad_id = self.num_symbols
+
+        # If symbol2vec exists as numpy array, keep it (matcher likely handles numpy)
+        # but ensure it's in a consistent dtype if we need to pass tensor later.
+        # Create matcher instance
         self.matcher = EmbedMatcher(
-            self.embed_dim, self.num_symbols, use_pretrain=self.use_pretrain,
-            embed=self.symbol2vec, dropout=self.dropout,
-            batch_size=self.batch_size, process_steps=self.process_steps,
-            finetune=self.fine_tune, aggregate=self.aggregate
+            self.embed_dim,
+            self.num_symbols,
+            use_pretrain=self.use_pretrain,
+            embed=self.symbol2vec,
+            dropout=self.dropout,
+            batch_size=self.batch_size,
+            process_steps=self.process_steps,
+            finetune=self.fine_tune,
+            aggregate=self.aggregate
         )
 
-        # Use DataParallel for multiple GPUs
+        # DataParallel if multiple GPUs
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
-        self.matcher.cuda()
+
+        # move matcher to device
+        self.matcher.to(self.device)
 
         self.batch_nums = 0
         self.writer = None if self.test else SummaryWriter('logs/' + self.prefix)
@@ -67,9 +83,13 @@ class Trainer(object):
         # load answer dict
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
-        # Move static tensors to GPU to save per-batch overhead
-        self.connections = torch.LongTensor(self.connections).cuda()
-        self.e1_degrees_tensor = torch.FloatTensor([self.e1_degrees[i] for i in range(self.num_ents)]).cuda()
+        # Move large static arrays to device (torch tensors)
+        # connections currently is numpy array shaped (num_ents, max_, 2)
+        self.connections = torch.LongTensor(self.connections).to(self.device)
+        # e1_degrees is a dict keyed by ent id; build contiguous tensor in ent-id order
+        e1_degrees_list = [float(self.e1_degrees.get(i, 0)) for i in range(self.num_ents)]
+        self.e1_degrees_tensor = torch.FloatTensor(e1_degrees_list).to(self.device)
+
 
     def load_symbol2id(self):
         symbol_id = {}
@@ -124,9 +144,11 @@ class Trainer(object):
             embeddings = np.array(embeddings)
 
             self.symbol2id = symbol_id
-            self.symbol2vec = embeddings
+            self.symbol2vec = embeddings  # keep as numpy for matcher init (unchanged behavior)
+
 
     def build_connection(self, max_=100):
+        # initialize with pad id
         self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
         self.e1_rele2 = defaultdict(list)
         self.e1_degrees = defaultdict(int)
@@ -138,13 +160,14 @@ class Trainer(object):
             lines = f.readlines()
             for line in tqdm(lines):
                 e1, rel, e2 = line.rstrip().split()
+                # guard: ensure rel and ent keys exist in symbol2id
                 self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
                 inv_rel = get_inverse_relation(rel)
                 self.e1_rele2[e2].append((self.symbol2id[inv_rel], self.symbol2id[e1]))
 
         degrees = {}
         for ent, id_ in self.ent2id.items():
-            neighbors = self.e1_rele2[ent]
+            neighbors = self.e1_rele2.get(ent, [])
             if len(neighbors) > max_:
                 neighbors = neighbors[:max_]
             degrees[ent] = len(neighbors)
@@ -154,12 +177,24 @@ class Trainer(object):
                 self.connections[id_, idx, 1] = _[1]
         return degrees
 
+
     def get_meta(self, left, right):
-        left_connections = self.connections[left,:,:]
-        left_degrees = self.e1_degrees_tensor[left]
-        right_connections = self.connections[right,:,:]
-        right_degrees = self.e1_degrees_tensor[right]
+        # left, right may be Python lists of ids. Convert to LongTensor on device to index.
+        if isinstance(left, (list, tuple, np.ndarray)):
+            left_idx = torch.LongTensor(left).to(self.device)
+        else:
+            left_idx = left.to(self.device)
+        if isinstance(right, (list, tuple, np.ndarray)):
+            right_idx = torch.LongTensor(right).to(self.device)
+        else:
+            right_idx = right.to(self.device)
+
+        left_connections = self.connections[left_idx, :, :]      # already on device
+        left_degrees = self.e1_degrees_tensor[left_idx]
+        right_connections = self.connections[right_idx, :, :]
+        right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
+
 
     def train(self):
         logging.info('START TRAINING...')
@@ -169,13 +204,15 @@ class Trainer(object):
 
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
+
             support_meta = self.get_meta(support_left, support_right)
             query_meta = self.get_meta(query_left, query_right)
             false_meta = self.get_meta(false_left, false_right)
 
-            support = torch.LongTensor(support).cuda()
-            query = torch.LongTensor(query).cuda()
-            false = torch.LongTensor(false).cuda()
+            # move batch tensors to device
+            support = torch.LongTensor(support).to(self.device)
+            query = torch.LongTensor(query).to(self.device)
+            false = torch.LongTensor(false).to(self.device)
 
             if self.no_meta:
                 query_scores = self.matcher(query, support)
@@ -187,7 +224,8 @@ class Trainer(object):
             margin_ = query_scores - false_scores
             margins.append(margin_.mean().item())
             loss = F.relu(self.margin - margin_).mean()
-            self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
+            if self.writer:
+                self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
 
             losses.append(loss.item())
             self.optim.zero_grad()
@@ -196,9 +234,10 @@ class Trainer(object):
 
             if self.batch_nums % self.eval_every == 0:
                 hits10, hits5, mrr = self.eval(meta=self.meta)
-                self.writer.add_scalar('HITS10', hits10, self.batch_nums)
-                self.writer.add_scalar('HITS5', hits5, self.batch_nums)
-                self.writer.add_scalar('MAP', mrr, self.batch_nums)
+                if self.writer:
+                    self.writer.add_scalar('HITS10', hits10, self.batch_nums)
+                    self.writer.add_scalar('HITS5', hits5, self.batch_nums)
+                    self.writer.add_scalar('MAP', mrr, self.batch_nums)
 
                 self.save()
                 if hits10 > best_hits10:
@@ -206,7 +245,8 @@ class Trainer(object):
                     best_hits10 = hits10
 
             if self.batch_nums % self.log_every == 0:
-                self.writer.add_scalar('Avg_batch_loss', np.mean(losses), self.batch_nums)
+                if self.writer:
+                    self.writer.add_scalar('Avg_batch_loss', np.mean(losses), self.batch_nums)
 
             self.batch_nums += 1
             self.scheduler.step()
@@ -214,15 +254,28 @@ class Trainer(object):
                 self.save()
                 break
 
+
     def save(self, path="models/initial"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(self.matcher.state_dict(), path)
+        # handle DataParallel wrapper
+        if isinstance(self.matcher, torch.nn.DataParallel):
+            torch.save(self.matcher.module.state_dict(), path)
+        else:
+            torch.save(self.matcher.state_dict(), path)
+
 
     def load(self):
-        self.matcher.load_state_dict(torch.load(self.save_path))
+        # load into CPU first then to device (safer)
+        state = torch.load(self.save_path, map_location=self.device)
+        if isinstance(self.matcher, torch.nn.DataParallel):
+            self.matcher.module.load_state_dict(state)
+        else:
+            self.matcher.load_state_dict(state)
+
 
     def escape_token(self, token):
         return token.replace(" ", "_")
+
 
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
@@ -252,7 +305,7 @@ class Trainer(object):
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
 
-            support = torch.LongTensor(support_pairs).cuda()
+            support = torch.LongTensor(support_pairs).to(self.device)
 
             for triple in test_tasks[query_][few:]:
                 true = triple[2]
@@ -274,13 +327,15 @@ class Trainer(object):
                             query_left.append(self.ent2id[e0])
                             query_right.append(self.ent2id[ent_esc])
 
-                query = torch.LongTensor(query_pairs).cuda()
+                query = torch.LongTensor(query_pairs).to(self.device)
                 if meta:
                     query_meta = self.get_meta(query_left, query_right)
-                    scores = self.matcher(query, support, query_meta, support_meta).detach().cpu().numpy()
+                    scores_t = self.matcher(query, support, query_meta, support_meta)
                 else:
-                    scores = self.matcher(query, support).detach().cpu().numpy()
+                    scores_t = self.matcher(query, support)
 
+                # move to cpu for numpy operations
+                scores = scores_t.detach().cpu().numpy()
                 sort = list(np.argsort(scores))[::-1]
                 rank = sort.index(0) + 1
                 hits10.append(1.0 if rank <= 10 else 0.0)
@@ -303,11 +358,13 @@ class Trainer(object):
         self.matcher.train()
         return np.mean(hits10), np.mean(hits5), np.mean(mrr)
 
+
     def test_(self):
         self.load()
         logging.info('Pre-trained model loaded')
         self.eval(mode='dev', meta=self.meta)
         self.eval(mode='test', meta=self.meta)
+
 
 if __name__ == '__main__':
     args = read_options()
@@ -316,6 +373,7 @@ if __name__ == '__main__':
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s %(levelname)s: - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
+    os.makedirs('./logs_', exist_ok=True)
     fh = logging.FileHandler('./logs_/log-{}.txt'.format(args.prefix))
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
@@ -329,7 +387,8 @@ if __name__ == '__main__':
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     trainer = Trainer(args)
     if args.test:
