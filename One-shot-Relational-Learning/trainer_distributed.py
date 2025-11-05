@@ -212,14 +212,11 @@ class Trainer(object):
             false_meta   = tuple(t.cuda(non_blocking=True) for t in self.get_meta(false_left, false_right))
 
             # move batch tensors to device
-            support = torch.LongTensor(support).cuda(non_blocking=True)
-            query = torch.LongTensor(query).cuda(non_blocking=True)
-            false = torch.LongTensor(false).cuda(non_blocking=True)
+            support = torch.LongTensor(support).pin_memory().cuda(non_blocking=True)
+            query = torch.LongTensor(query).pin_memory().cuda(non_blocking=True)
+            false = torch.LongTensor(false).pin_memory().cuda(non_blocking=True)
 
-            
-            # Check matcher device
-            first_param = next(self.matcher.parameters())
-            print("Matcher device check:", first_param.device)
+
 
             if isinstance(self.matcher, torch.nn.DataParallel):
                 print("DataParallel device IDs:", self.matcher.device_ids)
@@ -401,6 +398,8 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
+
+    torch.backends.cudnn.benchmark = True
 
     trainer = Trainer(args)
     if args.test:
