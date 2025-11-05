@@ -1,4 +1,4 @@
-# trainer1_fixed.py
+# trainer1_fixed_gpu.py
 import json
 import logging
 import numpy as np
@@ -16,19 +16,17 @@ from data_loader import *
 from matcher import *
 from tensorboardX import SummaryWriter
 
-torch.set_default_tensor_type('torch.FloatTensor')
-
 class Trainer(object):
     
     def __init__(self, arg):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
-        # device: prefer GPUs if available
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # improve cuDNN perf for fixed-size inputs
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True
+        # Force GPU usage
+        if not torch.cuda.is_available():
+            raise RuntimeError("No GPU found. This trainer requires a GPU.")
+        self.device = torch.device("cuda")
+        torch.backends.cudnn.benchmark = True
 
         self.meta = not self.no_meta
         use_pretrain = not self.random_embed
@@ -44,9 +42,7 @@ class Trainer(object):
         self.num_symbols = len(self.symbol2id.keys()) - 1
         self.pad_id = self.num_symbols
 
-        # If symbol2vec exists as numpy array, keep it (matcher likely handles numpy)
-        # but ensure it's in a consistent dtype if we need to pass tensor later.
-        # Create matcher instance
+        # Matcher setup
         self.matcher = EmbedMatcher(
             self.embed_dim,
             self.num_symbols,
@@ -58,12 +54,8 @@ class Trainer(object):
             finetune=self.fine_tune,
             aggregate=self.aggregate
         )
-
-        # DataParallel if multiple GPUs
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
-
-        # move matcher to device
         self.matcher.to(self.device)
 
         self.batch_nums = 0
@@ -81,18 +73,16 @@ class Trainer(object):
 
         logging.info('LOADING CANDIDATES ENTITIES')
         self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json')) 
-
-        # load answer dict
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
-        # Move large static arrays to device (torch tensors)
-        # connections currently is numpy array shaped (num_ents, max_, 2)
+        # Move large static tensors to GPU
         self.connections = torch.LongTensor(self.connections).to(self.device)
-        # e1_degrees is a dict keyed by ent id; build contiguous tensor in ent-id order
         e1_degrees_list = [float(self.e1_degrees.get(i, 0)) for i in range(self.num_ents)]
         self.e1_degrees_tensor = torch.FloatTensor(e1_degrees_list).to(self.device)
 
+        print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
+    # --- SYMBOL / EMBEDDING LOADERS ---
     def load_symbol2id(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
@@ -143,14 +133,11 @@ class Trainer(object):
                     embeddings.append(list(ent_embed[ent2id[key],:]))
             symbol_id['PAD'] = i
             embeddings.append(list(np.zeros((rel_embed.shape[1],))))
-            embeddings = np.array(embeddings)
-
             self.symbol2id = symbol_id
-            self.symbol2vec = embeddings  # keep as numpy for matcher init (unchanged behavior)
+            self.symbol2vec = np.array(embeddings)
 
-
+    # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
-        # initialize with pad id
         self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
         self.e1_rele2 = defaultdict(list)
         self.e1_degrees = defaultdict(int)
@@ -162,7 +149,6 @@ class Trainer(object):
             lines = f.readlines()
             for line in tqdm(lines):
                 e1, rel, e2 = line.rstrip().split()
-                # guard: ensure rel and ent keys exist in symbol2id
                 self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
                 inv_rel = get_inverse_relation(rel)
                 self.e1_rele2[e2].append((self.symbol2id[inv_rel], self.symbol2id[e1]))
@@ -179,25 +165,18 @@ class Trainer(object):
                 self.connections[id_, idx, 1] = _[1]
         return degrees
 
-
+    # --- META EXTRACTION ---
     def get_meta(self, left, right):
-        # left, right may be Python lists of ids. Convert to LongTensor on device to index.
-        if isinstance(left, (list, tuple, np.ndarray)):
-            left_idx = torch.LongTensor(left).to(self.device)
-        else:
-            left_idx = left.to(self.device)
-        if isinstance(right, (list, tuple, np.ndarray)):
-            right_idx = torch.LongTensor(right).to(self.device)
-        else:
-            right_idx = right.to(self.device)
+        left_idx = torch.LongTensor(left).to(self.device)
+        right_idx = torch.LongTensor(right).to(self.device)
 
-        left_connections = self.connections[left,:,:].cuda()      # already on device
-        left_degrees = self.e1_degrees_tensor[left].cuda()
-        right_connections = self.connections[right_idx, :, :]
+        left_connections = self.connections[left_idx,:,:]
+        left_degrees = self.e1_degrees_tensor[left_idx]
+        right_connections = self.connections[right_idx,:,:]
         right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
 
-
+    # --- TRAINING LOOP ---
     def train(self):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
@@ -207,21 +186,17 @@ class Trainer(object):
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
 
-            support_meta = tuple(t.cuda(non_blocking=True) for t in self.get_meta(support_left, support_right))
-            query_meta   = tuple(t.cuda(non_blocking=True) for t in self.get_meta(query_left, query_right))
-            false_meta   = tuple(t.cuda(non_blocking=True) for t in self.get_meta(false_left, false_right))
+            support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
+            query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
+            false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
 
-            # move batch tensors to device
-            support = torch.LongTensor(support).pin_memory().cuda(non_blocking=True)
-            query = torch.LongTensor(query).pin_memory().cuda(non_blocking=True)
-            false = torch.LongTensor(false).pin_memory().cuda(non_blocking=True)
+            support = torch.LongTensor(support).pin_memory().to(self.device, non_blocking=True)
+            query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
+            false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
 
-
-
-            if isinstance(self.matcher, torch.nn.DataParallel):
-                print("DataParallel device IDs:", self.matcher.device_ids)
-
-
+            # GPU memory print
+            print(f"Batch {self.batch_nums} - GPU memory allocated: {torch.cuda.memory_allocated()/1024**2:.2f} MB, "
+                  f"cached: {torch.cuda.memory_reserved()/1024**2:.2f} MB")
 
             if self.no_meta:
                 query_scores = self.matcher(query, support)
@@ -263,40 +238,29 @@ class Trainer(object):
                 self.save()
                 break
 
-
+    # --- SAVE / LOAD ---
     def save(self, path="models/initial"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # handle DataParallel wrapper
         if isinstance(self.matcher, torch.nn.DataParallel):
             torch.save(self.matcher.module.state_dict(), path)
         else:
             torch.save(self.matcher.state_dict(), path)
 
-
     def load(self):
-        # load into CPU first then to device (safer)
         state = torch.load(self.save_path, map_location=self.device)
         if isinstance(self.matcher, torch.nn.DataParallel):
             self.matcher.module.load_state_dict(state)
         else:
             self.matcher.load_state_dict(state)
 
-
-    def escape_token(self, token):
-        return token.replace(" ", "_")
-
-
+    # --- EVALUATION ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        if mode == 'dev':
-            test_tasks = json.load(open(self.dataset + '/validation_tasks.json'))
-        else:
-            test_tasks = json.load(open(self.dataset + '/test_tasks.json'))
-
+        test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode=='dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
@@ -304,10 +268,8 @@ class Trainer(object):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
-            support_pairs = [
-                [symbol2id[self.escape_token(triple[0])], symbol2id[self.escape_token(triple[2])]]
-                for triple in support_triples
-            ]
+            support_pairs = [[symbol2id[self.escape_token(triple[0])],
+                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
             if meta:
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
@@ -319,15 +281,12 @@ class Trainer(object):
             for triple in test_tasks[query_][few:]:
                 true = triple[2]
                 query_pairs = [[symbol2id[self.escape_token(triple[0])], symbol2id[self.escape_token(triple[2])]]]
-
                 if meta:
                     query_left = [self.ent2id[self.escape_token(triple[0])]]
                     query_right = [self.ent2id[self.escape_token(triple[2])]]
 
                 for ent in candidates:
-                    e0 = self.escape_token(triple[0])
-                    er = self.escape_token(triple[1])
-                    ent_esc = self.escape_token(ent)
+                    e0, er, ent_esc = self.escape_token(triple[0]), self.escape_token(triple[1]), self.escape_token(ent)
                     if (e0 not in self.e1rel_e2 or
                         er not in self.e1rel_e2[e0] or
                         ent_esc not in self.e1rel_e2[e0][er]) and ent != true:
@@ -336,14 +295,13 @@ class Trainer(object):
                             query_left.append(self.ent2id[e0])
                             query_right.append(self.ent2id[ent_esc])
 
-                query = torch.LongTensor(query_pairs).cuda(non_blocking=True)
+                query = torch.LongTensor(query_pairs).to(self.device, non_blocking=True)
                 if meta:
-                    query_meta = tuple(t.cuda(non_blocking=True) for t in self.get_meta(query_left, query_right))
+                    query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
                     scores_t = self.matcher(query, support, query_meta, support_meta)
                 else:
                     scores_t = self.matcher(query, support)
 
-                # move to cpu for numpy operations
                 scores = scores_t.detach().cpu().numpy()
                 sort = list(np.argsort(scores))[::-1]
                 rank = sort.index(0) + 1
@@ -356,7 +314,8 @@ class Trainer(object):
                 hits1_.append(1.0 if rank <= 1 else 0.0)
                 mrr_.append(1.0 / rank)
 
-            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
+            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
+                query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
             logging.info('Number of candidates: {}, number of text examples {}'.format(len(candidates), len(hits10_)))
 
         logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
@@ -367,12 +326,14 @@ class Trainer(object):
         self.matcher.train()
         return np.mean(hits10), np.mean(hits5), np.mean(mrr)
 
-
     def test_(self):
         self.load()
         logging.info('Pre-trained model loaded')
         self.eval(mode='dev', meta=self.meta)
         self.eval(mode='test', meta=self.meta)
+
+    def escape_token(self, token):
+        return token.replace(" ", "_")
 
 
 if __name__ == '__main__':
@@ -396,9 +357,7 @@ if __name__ == '__main__':
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-
+    torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.benchmark = True
 
     trainer = Trainer(args)
