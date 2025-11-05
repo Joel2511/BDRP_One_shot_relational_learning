@@ -7,7 +7,14 @@ from matcher import *
 from tensorboardX import SummaryWriter
 import os
 from tqdm import tqdm
-
+import json
+import numpy as np
+import torch
+from torch.autograd import Variable
+import logging
+import random
+import torch.nn.functional as F
+import torch.nn as nn
 
 class Trainer(object):
     def __init__(self, arg):
@@ -18,7 +25,7 @@ class Trainer(object):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.meta = not self.no_meta
 
-        # pre-train
+        # Pretrain embedding usage flag
         if self.random_embed:
             use_pretrain = False
         else:
@@ -26,27 +33,32 @@ class Trainer(object):
 
         logging.info('LOADING SYMBOL ID AND SYMBOL EMBEDDING')
         if self.test or self.random_embed:
-            # gen symbol2id, without embedding
+            # Use gmatching load_symbol2id
             self.load_symbol2id()
             use_pretrain = False
         else:
+            # Use gmatching load_embed
             self.load_embed()
+
         self.use_pretrain = use_pretrain
 
         self.num_symbols = len(self.symbol2id.keys()) - 1  # one for 'PAD'
         self.pad_id = self.num_symbols
 
-        self.Matcher = Matcher(self.embed_dim, self.num_symbols,
-                               use_pretrain=self.use_pretrain,
-                               embed=self.symbol2vec,
-                               dropout_layers=self.dropout_layers,
-                               dropout_input=self.dropout_input,
-                               dropout_neighbors=self.dropout_neighbors,
-                               finetune=self.fine_tune,
-                               num_transformer_layers=self.num_transformer_layers,
-                               num_transformer_heads=self.num_transformer_heads,
-                               device=self.device
-                               )
+        # Use FAAN's Matcher
+        self.Matcher = Matcher(
+            self.embed_dim,
+            self.num_symbols,
+            use_pretrain=self.use_pretrain,
+            embed=self.symbol2vec,
+            dropout_layers=self.dropout_layers,
+            dropout_input=self.dropout_input,
+            dropout_neighbors=self.dropout_neighbors,
+            finetune=self.fine_tune,
+            num_transformer_layers=self.num_transformer_layers,
+            num_transformer_heads=self.num_transformer_heads,
+            device=self.device
+        )
 
         self.Matcher.to(self.device)
         self.batch_nums = 0
@@ -56,13 +68,13 @@ class Trainer(object):
             self.writer = SummaryWriter('logs/' + self.prefix)
 
         self.parameters = filter(lambda p: p.requires_grad, self.Matcher.parameters())
-
         self.optim = optim.Adam(self.parameters, lr=self.lr, weight_decay=self.weight_decay)
         self.ent2id = json.load(open(self.dataset + '/ent2ids'))
         self.num_ents = len(self.ent2id.keys())
 
         logging.info('BUILDING CONNECTION MATRIX')
-        degrees = self.build_connection(max_=self.max_neighbor)
+        # Use gmatching build_connection with proper inverse
+        self.build_connection(self.max_neighbor)
 
         logging.info('LOADING CANDIDATES ENTITIES')
         self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json'))
@@ -72,39 +84,31 @@ class Trainer(object):
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
     def load_symbol2id(self):
-        # gen symbol2id, without embedding
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
         i = 0
-        # rel and ent combine together
         for key in rel2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
                 i += 1
-
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
                 i += 1
-
         symbol_id['PAD'] = i
         self.symbol2id = symbol_id
         self.symbol2vec = None
 
     def load_embed(self):
-        # gen symbol2id, with embedding
         symbol_id = {}
-        rel2id = json.load(open(self.dataset + '/relation2ids'))  # relation2id contains inverse rel
+        rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
-
         logging.info('LOADING PRE-TRAINED EMBEDDING')
         if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL']:
             ent_embed = np.loadtxt(self.dataset + '/entity2vec.' + self.embed_model)
-            rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)  # contain inverse edge
-
+            rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)
             if self.embed_model == 'ComplEx':
-                # normalize the complex embeddings
                 ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
                 ent_std = np.std(ent_embed, axis=1, keepdims=True)
                 rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
@@ -112,10 +116,8 @@ class Trainer(object):
                 eps = 1e-3
                 ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
                 rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
-
             assert ent_embed.shape[0] == len(ent2id.keys())
             assert rel_embed.shape[0] == len(rel2id.keys())
-
             i = 0
             embeddings = []
             for key in rel2id.keys():
@@ -123,18 +125,15 @@ class Trainer(object):
                     symbol_id[key] = i
                     i += 1
                     embeddings.append(list(rel_embed[rel2id[key], :]))
-
             for key in ent2id.keys():
                 if key not in ['', 'OOV']:
                     symbol_id[key] = i
                     i += 1
                     embeddings.append(list(ent_embed[ent2id[key], :]))
-
             symbol_id['PAD'] = i
             embeddings.append(list(np.zeros((rel_embed.shape[1],))))
             embeddings = np.array(embeddings)
             assert embeddings.shape[0] == len(symbol_id.keys())
-
             self.symbol2id = symbol_id
             self.symbol2vec = embeddings
 
@@ -142,24 +141,31 @@ class Trainer(object):
         self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
         self.e1_rele2 = defaultdict(list)
         self.e1_degrees = defaultdict(int)
+
+        def get_inverse_relation(rel):
+            return rel if rel.endswith('_inv') else rel + '_inv'
+
         with open(self.dataset + '/path_graph') as f:
             lines = f.readlines()
             for line in tqdm(lines):
                 e1, rel, e2 = line.rstrip().split()
-                self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))  # 1-n
-                self.e1_rele2[e2].append((self.symbol2id[rel + '_inv'], self.symbol2id[e1]))  # n-1
+                self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
+                inv_rel = get_inverse_relation(rel)
+                self.e1_rele2[e2].append((self.symbol2id[inv_rel], self.symbol2id[e1]))
 
         degrees = {}
         for ent, id_ in self.ent2id.items():
-            neighbors = self.e1_rele2[ent]
+            neighbors = self.e1_rele2.get(ent, [])
             if len(neighbors) > max_:
                 neighbors = neighbors[:max_]
             degrees[ent] = len(neighbors)
-            self.e1_degrees[id_] = len(neighbors)  # add one for self conn
+            self.e1_degrees[id_] = len(neighbors)
             for idx, _ in enumerate(neighbors):
-                self.connections[id_, idx, 0] = _[0]  # rel
-                self.connections[id_, idx, 1] = _[1]  # tail
+                self.connections[id_, idx, 0] = _[0]
+                self.connections[id_, idx, 1] = _[1]
+
         return degrees
+
 
     def save(self, path=None):
         if not path:
@@ -433,4 +439,5 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
