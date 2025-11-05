@@ -305,8 +305,13 @@ class Trainer(object):
                     query_left.append(self.ent2id[triple[0]])
                     query_right.append(self.ent2id[triple[2]])
                 for ent in candidates:
-                    if (ent not in self.e1rel_e2[triple[0] + triple[1]]) and ent != true:
-                        query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
+                    e0 = escape_token(triple[0])
+                    er = escape_token(triple[1])
+                    ent_esc = escape_token(ent)
+                    key = triple[0] + triple[1]
+                    if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
+                        if ent != true:
+                            query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
                         if meta:
                             query_left.append(self.ent2id[triple[0]])
                             query_right.append(self.ent2id[ent])
@@ -445,3 +450,4 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
