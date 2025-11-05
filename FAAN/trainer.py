@@ -263,18 +263,18 @@ class Trainer(object):
 
     def eval(self, mode='dev', meta=False):
         self.Matcher.eval()
-
+    
         symbol2id = self.symbol2id
         few = self.few
-
+    
         logging.info('EVALUATING ON %s DATA' % mode.upper())
         if mode == 'dev':
             test_tasks = json.load(open(self.dataset + '/validation_tasks.json'))
         else:
             test_tasks = json.load(open(self.dataset + '/test_tasks.json'))
-
+    
         rel2candidates = self.rel2candidates
-
+    
         hits10 = []
         hits5 = []
         hits1 = []
@@ -287,13 +287,24 @@ class Trainer(object):
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[triple[0]], symbol2id[triple[2]]] for triple in support_triples]
-
+    
             if meta:
                 support_left = [self.ent2id[triple[0]] for triple in support_triples]
                 support_right = [self.ent2id[triple[2]] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
-
+    
             support = Variable(torch.LongTensor(support_pairs)).to(self.device)
+
+                        # prepare global candidate lists
+            all_test = test_tasks[query_][few:]
+            for triple in all_test:
+                true = triple[2]
+                query_pairs = []
+                query_left = []
+                query_right = []
+                query_pairs.append([symbol2id[triple[0]], symbol2id[triple[2]]])
+                query_left.append(self.ent2id[triple[0]])
+                query_right.append(self.ent2id[triple[2]])
 
             for triple in test_tasks[query_][few:]:
                 true = triple[2]
@@ -304,30 +315,23 @@ class Trainer(object):
                     query_right = []
                     query_left.append(self.ent2id[triple[0]])
                     query_right.append(self.ent2id[triple[2]])
-                for ent in candidates:
-                    e0 = escape_token(triple[0])
-                    er = escape_token(triple[1])
-                    ent_esc = escape_token(ent)
-                    key = triple[0] + triple[1]
-                    if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
-                        if ent != true:
-                            query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
-                        if meta:
-                            query_left.append(self.ent2id[triple[0]])
-                            query_right.append(self.ent2id[ent])
+                        for ent in candidates:
+            key = triple[0] + triple[1]
+            if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
+                if ent != true:
+                    query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
+                    query_left.append(self.ent2id[triple[0]])
+                    query_right.append(self.ent2id[ent])
 
-                query = Variable(torch.LongTensor(query_pairs)).to(self.device)
+        query = Variable(torch.LongTensor(query_pairs)).to(self.device)
+        query_meta = self.get_meta(query_left, query_right)
 
-                if meta:
-                    query_meta = self.get_meta(query_left, query_right)
-                    scores, _ = self.Matcher(support, query, None, isEval=True,
-                                             support_meta=support_meta,
-                                             query_meta=query_meta,
-                                             false_meta=None)
-                    scores.detach()
-                    scores = scores.data
+        scores, _ = self.Matcher(support, query, None, isEval=True,
+                                 support_meta=support_meta,
+                                 query_meta=query_meta,
+                                 false_meta=None)
 
-                scores = scores.cpu().numpy()
+        scores = scores.detach().cpu().numpy()
                 sort = list(np.argsort(scores, kind='stable'))[::-1]
                 rank = sort.index(0) + 1
                 if rank <= 10:
@@ -450,4 +454,5 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
