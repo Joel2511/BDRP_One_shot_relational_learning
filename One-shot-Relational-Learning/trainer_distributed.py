@@ -16,6 +16,8 @@ from data_loader import *
 from matcher import *
 from tensorboardX import SummaryWriter
 
+torch.set_default_tensor_type('torch.FloatTensor')
+
 class Trainer(object):
     
     def __init__(self, arg):
@@ -189,8 +191,8 @@ class Trainer(object):
         else:
             right_idx = right.to(self.device)
 
-        left_connections = self.connections[left_idx, :, :]      # already on device
-        left_degrees = self.e1_degrees_tensor[left_idx]
+        left_connections = self.connections[left,:,:].cuda()      # already on device
+        left_degrees = self.e1_degrees_tensor[left].cuda()
         right_connections = self.connections[right_idx, :, :]
         right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
@@ -205,14 +207,24 @@ class Trainer(object):
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
 
-            support_meta = self.get_meta(support_left, support_right)
-            query_meta = self.get_meta(query_left, query_right)
-            false_meta = self.get_meta(false_left, false_right)
+            support_meta = tuple(t.cuda(non_blocking=True) for t in self.get_meta(support_left, support_right))
+            query_meta   = tuple(t.cuda(non_blocking=True) for t in self.get_meta(query_left, query_right))
+            false_meta   = tuple(t.cuda(non_blocking=True) for t in self.get_meta(false_left, false_right))
 
             # move batch tensors to device
-            support = torch.LongTensor(support).to(self.device)
-            query = torch.LongTensor(query).to(self.device)
-            false = torch.LongTensor(false).to(self.device)
+            support = torch.LongTensor(support).cuda(non_blocking=True)
+            query = torch.LongTensor(query).cuda(non_blocking=True)
+            false = torch.LongTensor(false).cuda(non_blocking=True)
+
+            
+            # Check matcher device
+            first_param = next(self.matcher.parameters())
+            print("Matcher device check:", first_param.device)
+
+            if isinstance(self.matcher, torch.nn.DataParallel):
+                print("DataParallel device IDs:", self.matcher.device_ids)
+
+
 
             if self.no_meta:
                 query_scores = self.matcher(query, support)
@@ -327,9 +339,9 @@ class Trainer(object):
                             query_left.append(self.ent2id[e0])
                             query_right.append(self.ent2id[ent_esc])
 
-                query = torch.LongTensor(query_pairs).to(self.device)
+                query = torch.LongTensor(query_pairs).cuda(non_blocking=True)
                 if meta:
-                    query_meta = self.get_meta(query_left, query_right)
+                    query_meta = tuple(t.cuda(non_blocking=True) for t in self.get_meta(query_left, query_right))
                     scores_t = self.matcher(query, support, query_meta, support_meta)
                 else:
                     scores_t = self.matcher(query, support)
