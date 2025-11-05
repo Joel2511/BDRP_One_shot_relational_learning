@@ -294,44 +294,36 @@ class Trainer(object):
                 support_meta = self.get_meta(support_left, support_right)
     
             support = Variable(torch.LongTensor(support_pairs)).to(self.device)
-
-                        # prepare global candidate lists
+    
             all_test = test_tasks[query_][few:]
             for triple in all_test:
                 true = triple[2]
                 query_pairs = []
                 query_left = []
                 query_right = []
+    
                 query_pairs.append([symbol2id[triple[0]], symbol2id[triple[2]]])
                 query_left.append(self.ent2id[triple[0]])
                 query_right.append(self.ent2id[triple[2]])
-
-            for triple in test_tasks[query_][few:]:
-                true = triple[2]
-                query_pairs = []
-                query_pairs.append([symbol2id[triple[0]], symbol2id[triple[2]]])
-                if meta:
-                    query_left = []
-                    query_right = []
-                    query_left.append(self.ent2id[triple[0]])
-                    query_right.append(self.ent2id[triple[2]])
-                        for ent in candidates:
-            key = triple[0] + triple[1]
-            if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
-                if ent != true:
-                    query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
-                    query_left.append(self.ent2id[triple[0]])
-                    query_right.append(self.ent2id[ent])
-
-        query = Variable(torch.LongTensor(query_pairs)).to(self.device)
-        query_meta = self.get_meta(query_left, query_right)
-
-        scores, _ = self.Matcher(support, query, None, isEval=True,
-                                 support_meta=support_meta,
-                                 query_meta=query_meta,
-                                 false_meta=None)
-
-        scores = scores.detach().cpu().numpy()
+    
+                for ent in candidates:
+                    key = triple[0] + triple[1]
+                    if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
+                        if ent != true:
+                            query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
+                            query_left.append(self.ent2id[triple[0]])
+                            query_right.append(self.ent2id[ent])
+    
+                query = Variable(torch.LongTensor(query_pairs)).to(self.device)
+                query_meta = self.get_meta(query_left, query_right)
+    
+                scores, _ = self.Matcher(support, query, None, isEval=True,
+                                         support_meta=support_meta,
+                                         query_meta=query_meta,
+                                         false_meta=None)
+    
+                scores = scores.detach().cpu().numpy()
+    
                 sort = list(np.argsort(scores, kind='stable'))[::-1]
                 rank = sort.index(0) + 1
                 if rank <= 10:
@@ -354,20 +346,17 @@ class Trainer(object):
                     hits1_.append(0.0)
                 mrr.append(1.0 / rank)
                 mrr_.append(1.0 / rank)
-
-            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f}, MRR:{:.3f}'.format(query_,
-                                                                                               np.mean(
-                                                                                                   hits10_),
-                                                                                               np.mean(hits5_),
-                                                                                               np.mean(hits1_),
-                                                                                               np.mean(mrr_),
-                                                                                               ))
+    
+            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f}, MRR:{:.3f}'.format(
+                query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
             logging.info('Number of candidates: {}, number of test examples {}'.format(len(candidates), len(hits10_)))
+    
         logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
         logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
         logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
         logging.critical('MRR: {:.3f}'.format(np.mean(mrr)))
         return np.mean(hits10), np.mean(hits5), np.mean(hits1), np.mean(mrr)
+
 
     def test_(self, path=None):
         self.load(path)
@@ -454,5 +443,6 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
 
