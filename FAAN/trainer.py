@@ -22,6 +22,8 @@ class Trainer(object):
         for k, v in vars(arg).items():
             setattr(self, k, v)
 
+        self.eval_every = arg.eval_every  # Added here for evaluation frequency control
+
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.meta = not self.no_meta
 
@@ -426,6 +428,10 @@ if __name__ == '__main__':
         logging.info(k + ': ' + str(v))
     logging.info('*' * 100)
 
+    # Set eval_every from args or default here if not present
+    if not hasattr(args, 'eval_every'):
+        args.eval_every = 1000  # or your gmatching default
+
     trainer = Trainer(args)
 
     if args.test:
@@ -439,5 +445,3 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
-
-
