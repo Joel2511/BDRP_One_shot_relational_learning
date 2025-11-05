@@ -261,7 +261,7 @@ class Trainer(object):
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
         if mode == 'dev':
-            test_tasks = json.load(open(self.dataset + '/dev_tasks.json'))
+            test_tasks = json.load(open(self.dataset + '/validation_tasks.json'))
         else:
             test_tasks = json.load(open(self.dataset + '/test_tasks.json'))
 
@@ -433,3 +433,4 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
