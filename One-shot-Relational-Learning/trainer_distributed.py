@@ -106,7 +106,7 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL']:
+        if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL','TransH']:
             ent_embed = np.loadtxt(self.dataset + '/entity2vec.' + self.embed_model)
             rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)
 
