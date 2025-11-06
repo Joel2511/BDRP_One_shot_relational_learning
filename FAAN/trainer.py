@@ -107,7 +107,7 @@ class Trainer(object):
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL']:
+        if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL','TransH']:
             ent_embed = np.loadtxt(self.dataset + '/entity2vec.' + self.embed_model)
             rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)
             if self.embed_model == 'ComplEx':
@@ -443,6 +443,7 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
 
 
