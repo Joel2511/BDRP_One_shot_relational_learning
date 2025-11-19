@@ -261,101 +261,92 @@ class Trainer(object):
                 self.save()
                 break
 
-    def eval(self, mode='dev', meta=False):
-        self.Matcher.eval()
-    
-        symbol2id = self.symbol2id
-        few = self.few
-    
-        logging.info('EVALUATING ON %s DATA' % mode.upper())
-        if mode == 'dev':
-            test_tasks = json.load(open(self.dataset + '/validation_tasks.json'))
-        else:
-            test_tasks = json.load(open(self.dataset + '/test_tasks.json'))
-    
-        rel2candidates = self.rel2candidates
-    
-        hits10 = []
-        hits5 = []
-        hits1 = []
-        mrr = []
-        for query_ in test_tasks.keys():
-            hits10_ = []
-            hits5_ = []
-            hits1_ = []
-            mrr_ = []
-            candidates = rel2candidates[query_]
-            support_triples = test_tasks[query_][:few]
-            support_pairs = [[symbol2id[triple[0]], symbol2id[triple[2]]] for triple in support_triples]
-    
-            if meta:
-                support_left = [self.ent2id[triple[0]] for triple in support_triples]
-                support_right = [self.ent2id[triple[2]] for triple in support_triples]
-                support_meta = self.get_meta(support_left, support_right)
-    
-            support = Variable(torch.LongTensor(support_pairs)).to(self.device)
-    
-            all_test = test_tasks[query_][few:]
-            for triple in all_test:
-                true = triple[2]
-                query_pairs = []
-                query_left = []
-                query_right = []
-    
-                query_pairs.append([symbol2id[triple[0]], symbol2id[triple[2]]])
-                query_left.append(self.ent2id[triple[0]])
-                query_right.append(self.ent2id[triple[2]])
-    
-                for ent in candidates:
-                    key = triple[0] + triple[1]
-                    if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
-                        if ent != true:
-                            query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
-                            query_left.append(self.ent2id[triple[0]])
-                            query_right.append(self.ent2id[ent])
-    
-                query = Variable(torch.LongTensor(query_pairs)).to(self.device)
-                query_meta = self.get_meta(query_left, query_right)
-    
-                scores, _ = self.Matcher(support, query, None, isEval=True,
-                                         support_meta=support_meta,
-                                         query_meta=query_meta,
-                                         false_meta=None)
-    
-                scores = scores.detach().cpu().numpy()
-    
-                sort = list(np.argsort(scores, kind='stable'))[::-1]
-                rank = sort.index(0) + 1
-                if rank <= 10:
-                    hits10.append(1.0)
-                    hits10_.append(1.0)
-                else:
-                    hits10.append(0.0)
-                    hits10_.append(0.0)
-                if rank <= 5:
-                    hits5.append(1.0)
-                    hits5_.append(1.0)
-                else:
-                    hits5.append(0.0)
-                    hits5_.append(0.0)
-                if rank <= 1:
-                    hits1.append(1.0)
-                    hits1_.append(1.0)
-                else:
-                    hits1.append(0.0)
-                    hits1_.append(0.0)
-                mrr.append(1.0 / rank)
-                mrr_.append(1.0 / rank)
-    
-            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f}, MRR:{:.3f}'.format(
-                query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
-            logging.info('Number of candidates: {}, number of test examples {}'.format(len(candidates), len(hits10_)))
-    
-        logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
-        logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
-        logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
-        logging.critical('MRR: {:.3f}'.format(np.mean(mrr)))
-        return np.mean(hits10), np.mean(hits5), np.mean(hits1), np.mean(mrr)
+def eval(self, mode='dev', meta=False):
+    self.Matcher.eval()
+
+    symbol2id = self.symbol2id
+    few = self.few
+
+    logging.info('EVALUATING ON %s DATA' % mode.upper())
+    if mode == 'dev':
+        test_tasks = json.load(open(self.dataset + '/validation_tasks.json'))
+    else:
+        test_tasks = json.load(open(self.dataset + '/test_tasks.json'))
+
+    rel2candidates = self.rel2candidates
+
+    hits10 = []
+    hits5 = []
+    hits1 = []
+    mrr = []
+
+    for query_ in test_tasks.keys():
+        hits10_ = []
+        hits5_ = []
+        hits1_ = []
+        mrr_ = []
+
+        candidates = rel2candidates[query_]
+        support_triples = test_tasks[query_][:few]
+        support_pairs = [[symbol2id[triple[0]], symbol2id[triple[2]]] for triple in support_triples]
+
+        if meta:
+            support_left = [self.ent2id[triple[0]] for triple in support_triples]
+            support_right = [self.ent2id[triple[2]] for triple in support_triples]
+            support_meta = self.get_meta(support_left, support_right)
+
+        support = Variable(torch.LongTensor(support_pairs)).to(self.device)
+
+        all_test = test_tasks[query_][few:]
+        for triple in all_test:
+            true = triple[2]
+            query_pairs = [[symbol2id[triple[0]], symbol2id[triple[2]]]]
+            query_left = [self.ent2id[triple[0]]]
+            query_right = [self.ent2id[triple[2]]]
+
+            for ent in candidates:
+                key = triple[0] + triple[1]
+                if key not in self.e1rel_e2 or ent not in self.e1rel_e2[key]:
+                    if ent != true:
+                        query_pairs.append([symbol2id[triple[0]], symbol2id[ent]])
+                        query_left.append(self.ent2id[triple[0]])
+                        query_right.append(self.ent2id[ent])
+
+            query = Variable(torch.LongTensor(query_pairs)).to(self.device)
+            query_meta = self.get_meta(query_left, query_right)
+
+            scores, _ = self.Matcher(support, query, None, isEval=True,
+                                     support_meta=support_meta,
+                                     query_meta=query_meta,
+                                     false_meta=None)
+
+            scores = scores.detach().cpu().numpy()
+            sort = list(np.argsort(scores, kind='stable'))[::-1]
+            rank = sort.index(0) + 1
+
+            hits10.append(1.0 if rank <= 10 else 0.0)
+            hits5.append(1.0 if rank <= 5 else 0.0)
+            hits1.append(1.0 if rank <= 1 else 0.0)
+            mrr.append(1.0 / rank)
+
+            hits10_.append(1.0 if rank <= 10 else 0.0)
+            hits5_.append(1.0 if rank <= 5 else 0.0)
+            hits1_.append(1.0 if rank <= 1 else 0.0)
+            mrr_.append(1.0 / rank)
+
+        # --- Match GMatching printing ---
+        logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
+            query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
+        logging.info('Number of candidates: {}, number of text examples {}'.format(len(candidates), len(hits10_)))
+
+    logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
+    logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
+    logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
+    logging.critical('MAP: {:.3f}'.format(np.mean(mrr)))
+
+    self.Matcher.train()
+    return np.mean(hits10), np.mean(hits5), np.mean(hits1), np.mean(mrr)
+
 
 
     def test_(self, path=None):
@@ -443,6 +434,7 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
 
 
