@@ -389,7 +389,7 @@ def adjust_learning_rate(optimizer, epoch, lr, warm_up_step, max_update_step, en
         param_group['lr'] = lr
     return lr
 
-ch.setLevel(logging.INFO)  # keeps aggregate metrics visible
+
 if __name__ == '__main__':
     args = read_options()
     if not os.path.exists('./logs_'):
@@ -437,6 +437,7 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
 
 
