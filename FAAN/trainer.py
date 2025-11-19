@@ -339,8 +339,8 @@ class Trainer(object):
                     mrr.append(1.0 / rank)
                     mrr_.append(1.0 / rank)
         
-                logging.critical('- {} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
-                    query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
+                #logging.critical('- {} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
+                    #query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
                 logging.info('Number of candidates: {}, number of test examples {}'.format(len(candidates), len(hits10_)))
         
             logging.critical('- HITS10: {:.3f}'.format(np.mean(hits10)))
@@ -389,7 +389,7 @@ def adjust_learning_rate(optimizer, epoch, lr, warm_up_step, max_update_step, en
         param_group['lr'] = lr
     return lr
 
-
+ch.setLevel(logging.INFO)  # keeps aggregate metrics visible
 if __name__ == '__main__':
     args = read_options()
     if not os.path.exists('./logs_'):
@@ -437,6 +437,7 @@ if __name__ == '__main__':
         print('best checkpoint!')
         trainer.eval_(args.save_path + '_best')
         trainer.test_(args.save_path + '_best')
+
 
 
 
