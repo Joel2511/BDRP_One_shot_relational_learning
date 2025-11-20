@@ -27,6 +27,11 @@ class EmbedMatcher(nn.Module):
         init.xavier_normal_(self.gate_linear.weight)
         init.constant_(self.gate_linear.bias, 0)
 
+        # --- Attention parameters added later ---
+        self.attn_linear = nn.Linear(self.embed_dim, 1)  # linear layer for computing attention scores
+        init.xavier_normal_(self.attn_linear.weight)
+        init.constant_(self.attn_linear.bias, 0)
+
         self.dropout = nn.Dropout(0.5)
 
         init.xavier_normal_(self.gcn_w.weight)
@@ -48,7 +53,7 @@ class EmbedMatcher(nn.Module):
         connections: (batch, 200, 2)
         num_neighbors: (batch,)
         '''
-        num_neighbors = num_neighbors.unsqueeze(1)
+        num_neighbors = num_neighbors.unsqueeze(1)  # (batch,1)
         relations = connections[:,:,0].squeeze(-1)
         entities = connections[:,:,1].squeeze(-1)
         rel_embeds = self.dropout(self.symbol_emb(relations)) # (batch, 200, embed_dim)
@@ -60,13 +65,23 @@ class EmbedMatcher(nn.Module):
         gate_values = torch.sigmoid(self.gate_linear(concat_embeds))  # (batch, 200, 1)
         gated_embeds = gate_values * concat_embeds  # Element-wise multiplication
 
-        out = self.gcn_w(gated_embeds) + self.gcn_b
+        # Project gated embeddings to embed_dim
+        projected = self.gcn_w(gated_embeds) + self.gcn_b  # (batch, 200, embed_dim)
 
-        out = torch.sum(out, dim=1) # (batch, embed_dim)
+        # --- Attention mechanism applied here ---
+        # Compute attention scores
+        attn_scores = self.attn_linear(projected).squeeze(-1)  # (batch, 200)
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)  # (batch, 200, 1)
+
+        # Weighted sum of neighbors
+        out = torch.sum(projected * attn_weights, dim=1)  # (batch, embed_dim)
+
+        # Normalize by number of neighbors to keep scale consistent
         out = out / num_neighbors
+
         return out.tanh()
 
-    # encode_neighbors unchanged; uses gated neighbor_encoder implicitly
+    # encode_neighbors updated to use gated + attentive neighbor_encoder implicitly
     def encode_neighbors(self, neighbors_1hop, neighbors_2hop, degrees):
         enc_1hop = self.neighbor_encoder(neighbors_1hop, degrees)
         enc_2hop = self.neighbor_encoder(neighbors_2hop, degrees)
