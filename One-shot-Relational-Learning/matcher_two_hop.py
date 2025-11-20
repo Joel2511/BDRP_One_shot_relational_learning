@@ -22,6 +22,11 @@ class EmbedMatcher(nn.Module):
         self.gcn_w = nn.Linear(2*self.embed_dim, self.embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.embed_dim))
 
+        # --- Gating parameters added later ---
+        self.gate_linear = nn.Linear(2*self.embed_dim, 1)  # Linear layer for gating
+        init.xavier_normal_(self.gate_linear.weight)
+        init.constant_(self.gate_linear.bias, 0)
+
         self.dropout = nn.Dropout(0.5)
 
         init.xavier_normal_(self.gcn_w.weight)
@@ -51,12 +56,17 @@ class EmbedMatcher(nn.Module):
 
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1) # (batch, 200, 2*embed_dim)
 
-        out = self.gcn_w(concat_embeds) + self.gcn_b
+        # --- Gating mechanism applied here ---
+        gate_values = torch.sigmoid(self.gate_linear(concat_embeds))  # (batch, 200, 1)
+        gated_embeds = gate_values * concat_embeds  # Element-wise multiplication
+
+        out = self.gcn_w(gated_embeds) + self.gcn_b
 
         out = torch.sum(out, dim=1) # (batch, embed_dim)
         out = out / num_neighbors
         return out.tanh()
 
+    # encode_neighbors unchanged; uses gated neighbor_encoder implicitly
     def encode_neighbors(self, neighbors_1hop, neighbors_2hop, degrees):
         enc_1hop = self.neighbor_encoder(neighbors_1hop, degrees)
         enc_2hop = self.neighbor_encoder(neighbors_2hop, degrees)
