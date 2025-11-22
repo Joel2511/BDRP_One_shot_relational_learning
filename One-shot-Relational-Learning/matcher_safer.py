@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 
-from module_safer import SAFERSupportAdaptation
+from modules_safer import SAFERSupportAdaptation
 from modules import Path
 from torch.autograd import Variable
 
