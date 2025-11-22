@@ -1,3 +1,4 @@
+# matcher_safer.py (CORRECTED)
 import logging
 import torch
 import torch.nn as nn
@@ -13,41 +14,53 @@ class SAFERMatcher(nn.Module):
     """
     SAFER Matching metric based on subgraph adaptation
     """
+    # Added embed_model to the signature if it wasn't there originally
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, dropout=0.2, k_num=100, embed_model='ComplEx'):
-            super(SAFERMatcher, self).__init__()
-            
-            # --- CRITICAL FIX START: Determine the true embedding dimension ---
-            self.embed_model = embed_model
-            # If ComplEx, the actual dimension is 2x the input component dimension
-            if self.embed_model == 'ComplEx':
-                self.k_num = self.true_embed_dim
-                #self.true_embed_dim = embed_dim * 2 # 100 * 2 = 200
-            else:
-                self.k_num= k_num
-            
-            self.embed_dim = embed_dim # Keep the original parameter for legacy/config logging
-            # --- CRITICAL FIX END ---
-            
-            self.pad_idx = num_symbols
-            
-            # Use TRUE_EMBED_DIM for the Embedding layer and Path module
-            self.symbol_emb = nn.Embedding(num_symbols + 1, self.true_embed_dim, padding_idx=num_symbols)
-            self.k_num = k_num
+        super(SAFERMatcher, self).__init__()
+        
+        # --- CRITICAL FIX START: Calculate and Define true_embed_dim ---
+        self.embed_model = embed_model
+        
+        # Calculate the actual embedding dimension (D * 2 for ComplEx, D otherwise)
+        if self.embed_model == 'ComplEx':
+            # This line was missing or commented out; it calculates the total 200 dimension.
+            self.true_embed_dim = embed_dim * 2 
+            # CRITICAL FIX: The k_num (Path convolution output dim) must match the total embedding dim (200)
+            self.k_num = self.true_embed_dim
+        else:
+            self.true_embed_dim = embed_dim
+            self.k_num = k_num # Use default k_num if not ComplEx
+        
+        # NOTE: self.embed_dim remains the component dimension (100)
+        self.embed_dim = embed_dim 
+        # --- CRITICAL FIX END ---
+        
+        self.pad_idx = num_symbols
+        
+        # Use TRUE_EMBED_DIM (200) for the Embedding layer
+        self.symbol_emb = nn.Embedding(num_symbols + 1, self.true_embed_dim, padding_idx=num_symbols)
+        # self.k_num is already set above
     
-            self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout)
     
-            if use_pretrain and embed is not None:
-                logging.info('LOADING KB EMBEDDINGS')
-                # Assuming 'embed' already contains the 200-column array
-                self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
-                self.symbol_emb.weight.requires_grad = False
+        if use_pretrain and embed is not None:
+            logging.info('LOADING KB EMBEDDINGS')
+            # Assuming 'embed' already contains the 200-column array
+            self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
+            self.symbol_emb.weight.requires_grad = False
     
-            # SAFER adaptation networks - Must use TRUE_EMBED_DIM
-            self.support_adaptor = SAFERSupportAdaptation(self.true_embed_dim)
-            self.query_encoder = nn.Linear(self.true_embed_dim, self.true_embed_dim)  
+        # SAFER adaptation networks - Must use TRUE_EMBED_DIM (200)
+        self.support_adaptor = SAFERSupportAdaptation(self.true_embed_dim)
+        self.query_encoder = nn.Linear(self.true_embed_dim, self.true_embed_dim)  
     
-            # Path convolution (as in your Path module) - Must use TRUE_EMBED_DIM
-            self.path_conv = Path(input_dim=self.true_embed_dim, num_symbols=num_symbols, use_pretrain=False, k_sizes=[3], k_num=self.k_num)
+        # Path convolution - Uses TRUE_EMBED_DIM (200) for input_dim and k_num
+        self.path_conv = Path(
+            input_dim=self.true_embed_dim, 
+            num_symbols=num_symbols, 
+            use_pretrain=False, # Must be False here as embeddings are loaded above
+            k_sizes=[3], 
+            k_num=self.k_num
+        )
 
     def encode_paths(self, path_indices):
         """
@@ -57,9 +70,10 @@ class SAFERMatcher(nn.Module):
         """
         if len(path_indices) == 0:
             # handle empty
-            return torch.zeros(1, self.embed_dim).cuda()
+            # NOTE: Changed from self.embed_dim to self.true_embed_dim for consistency
+            return torch.zeros(1, self.true_embed_dim).cuda() 
         paths_tensor = torch.LongTensor(path_indices).cuda()
-        path_embeds = self.path_conv(paths_tensor) # [num_paths, embed_dim]
+        path_embeds = self.path_conv(paths_tensor) # [num_paths, true_embed_dim]
         return path_embeds
 
     def forward(self, support_subgraphs, query_subgraphs, false_subgraphs=None):
@@ -75,7 +89,7 @@ class SAFERMatcher(nn.Module):
         # [num_support, num_paths, embed_dim] → support adaptation
         support_adapted = self.support_adaptor(support_embeds_all)
         # mean-pool over all adapted support paths, then average across supports
-        support_repr = torch.stack([sa.mean(dim=0) for sa in support_adapted]).mean(dim=0) # [embed_dim,]
+        support_repr = torch.stack([sa.mean(dim=0) for sa in support_adapted]).mean(dim=0) # [true_embed_dim,]
 
         # Encode query subgraphs
         query_embeds_all = []
@@ -84,7 +98,7 @@ class SAFERMatcher(nn.Module):
                 continue
             query_embeds_all.append(self.encode_paths(query_paths))
         # mean-pool over all query paths (for each test query)
-        query_repr = torch.stack([qe.mean(dim=0) for qe in query_embeds_all]) # [batch_size, embed_dim]
+        query_repr = torch.stack([qe.mean(dim=0) for qe in query_embeds_all]) # [batch_size, true_embed_dim]
         query_repr = self.query_encoder(query_repr) # (optional SAE block)
 
         # Cosine similarity for SAFER
