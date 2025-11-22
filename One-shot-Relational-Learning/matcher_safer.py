@@ -20,9 +20,10 @@ class SAFERMatcher(nn.Module):
             self.embed_model = embed_model
             # If ComplEx, the actual dimension is 2x the input component dimension
             if self.embed_model == 'ComplEx':
-                self.true_embed_dim = embed_dim * 2 # 100 * 2 = 200
+                self.k_num = self.true_embed_dim
+                #self.true_embed_dim = embed_dim * 2 # 100 * 2 = 200
             else:
-                self.true_embed_dim = embed_dim
+                self.k_num= k_num
             
             self.embed_dim = embed_dim # Keep the original parameter for legacy/config logging
             # --- CRITICAL FIX END ---
