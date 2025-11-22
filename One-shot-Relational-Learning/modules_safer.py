@@ -14,12 +14,13 @@ class SAFERSupportAdaptation(nn.Module):
         super(SAFERSupportAdaptation, self).__init__()
         self.embed_dim = embed_dim
         self.num_iters = num_iters
-        self.edge_nn = nn.Linear(embed_dim, embed_dim)
+        # CRITICAL FIX: The input/output to nn.Linear must match the total embedding size (200)
+        self.edge_nn = nn.Linear(embed_dim, embed_dim) 
 
     def forward(self, support_graphs):
         adapted_graphs = []
         for sg in support_graphs:
-            print(f"DEBUG sg shape: {sg.shape}")
+            # DEBUG line removed for clean running
             edge_embeds = self.edge_nn(sg)
             weights = torch.sigmoid(edge_embeds.mean(dim=-1, keepdim=True))
             adapted = sg * weights
