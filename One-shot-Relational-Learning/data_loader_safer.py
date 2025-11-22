@@ -35,10 +35,20 @@ def train_generate_safer(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, 
         else:
             query_triples = random.sample(all_test_triples, batch_size)
 
-        # Construct support/query subgraphs for SAFER
-        support_subgraphs = [grapher.pair_feature((escape_token(triple[0]), escape_token(triple[2]))) for triple in support_triples]
-        query_subgraphs = [grapher.pair_feature((escape_token(triple[0]), escape_token(triple[2]))) for triple in query_triples]
-        
+        # Construct and encode support subgraphs
+        support_subgraphs = []
+        for triple in support_triples:
+            raw_paths = grapher.pair_feature((escape_token(triple[0]), escape_token(triple[2])))
+            encoded_paths = [grapher.encode_path(p) for p in raw_paths]
+            support_subgraphs.append(encoded_paths)
+
+        # Construct and encode query subgraphs
+        query_subgraphs = []
+        for triple in query_triples:
+            raw_paths = grapher.pair_feature((escape_token(triple[0]), escape_token(triple[2])))
+            encoded_paths = [grapher.encode_path(p) for p in raw_paths]
+            query_subgraphs.append(encoded_paths)
+
         false_pairs = []
         false_subgraphs = []
         for triple in query_triples:
@@ -48,11 +58,15 @@ def train_generate_safer(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, 
             key = e_h + rel
             while True:
                 noise = escape_token(random.choice(candidates))
-                if key in e1rel_e2 and noise in e1rel_e2[key]: continue
-                if noise == e_t: continue
+                if key in e1rel_e2 and noise in e1rel_e2[key]:
+                    continue
+                if noise == e_t:
+                    continue
                 break
             false_pairs.append([symbol2id[noise], symbol2id[e_h]])
-            false_subgraphs.append(grapher.pair_feature((e_h, noise)))
+            raw_paths = grapher.pair_feature((e_h, noise))
+            encoded_paths = [grapher.encode_path(p) for p in raw_paths]
+            false_subgraphs.append(encoded_paths)
 
         yield support_subgraphs, query_subgraphs, false_subgraphs
 # === SAFER CHANGE END ===
