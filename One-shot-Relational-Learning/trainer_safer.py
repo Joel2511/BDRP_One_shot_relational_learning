@@ -1,4 +1,3 @@
-# trainer1_fixed_gpu.py
 import json
 import logging
 import numpy as np
@@ -12,17 +11,17 @@ import os
 import random
 
 from args import read_options
-from data_loader import *
-from matcher import *
+from data_loader import train_generate_safer # SAFER-specific loader
+from matcher_safer import SAFERMatcher      # NEW: use the SAFER matcher
 from tensorboardX import SummaryWriter
+from grapher import Graph                   # Needed for extracting subgraphs for SAFER
 
 class Trainer(object):
-    
+
     def __init__(self, arg):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
-        # Force GPU usage
         if not torch.cuda.is_available():
             raise RuntimeError("No GPU found. This trainer requires a GPU.")
         self.device = torch.device("cuda")
@@ -42,17 +41,13 @@ class Trainer(object):
         self.num_symbols = len(self.symbol2id.keys()) - 1
         self.pad_id = self.num_symbols
 
-        # Matcher setup
-        self.matcher = EmbedMatcher(
+        # SAFER matcher initialization
+        self.matcher = SAFERMatcher(
             self.embed_dim,
             self.num_symbols,
             use_pretrain=self.use_pretrain,
             embed=self.symbol2vec,
-            dropout=self.dropout,
-            batch_size=self.batch_size,
-            process_steps=self.process_steps,
-            finetune=self.fine_tune,
-            aggregate=self.aggregate
+            dropout=self.dropout
         )
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
@@ -68,19 +63,14 @@ class Trainer(object):
         self.ent2id = json.load(open(self.dataset + '/ent2ids'))
         self.num_ents = len(self.ent2id.keys())
 
-        logging.info('BUILDING CONNECTION MATRIX')
-        degrees = self.build_connection(max_=self.max_neighbor)
-
         logging.info('LOADING CANDIDATES ENTITIES')
-        self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json')) 
+        self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json'))
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
-        # Move large static tensors to GPU
-        self.connections = torch.LongTensor(self.connections).to(self.device)
-        e1_degrees_list = [float(self.e1_degrees.get(i, 0)) for i in range(self.num_ents)]
-        self.e1_degrees_tensor = torch.FloatTensor(e1_degrees_list).to(self.device)
+        # SAFER: instantiate Graph for extracting subgraphs
+        self.grapher = Graph(self.dataset) 
 
-        print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
+        print(f"SAFER Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
     # --- SYMBOL / EMBEDDING LOADERS ---
     def load_symbol2id(self):
@@ -136,46 +126,6 @@ class Trainer(object):
             self.symbol2id = symbol_id
             self.symbol2vec = np.array(embeddings)
 
-    # --- CONNECTION MATRIX ---
-    def build_connection(self, max_=100):
-        self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
-        self.e1_rele2 = defaultdict(list)
-        self.e1_degrees = defaultdict(int)
-
-        def get_inverse_relation(rel):
-            return rel if rel.endswith('_inv') else rel + '_inv'
-
-        with open(self.dataset + '/path_graph') as f:
-            lines = f.readlines()
-            for line in tqdm(lines):
-                e1, rel, e2 = line.rstrip().split()
-                self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
-                inv_rel = get_inverse_relation(rel)
-                self.e1_rele2[e2].append((self.symbol2id[inv_rel], self.symbol2id[e1]))
-
-        degrees = {}
-        for ent, id_ in self.ent2id.items():
-            neighbors = self.e1_rele2.get(ent, [])
-            if len(neighbors) > max_:
-                neighbors = neighbors[:max_]
-            degrees[ent] = len(neighbors)
-            self.e1_degrees[id_] = len(neighbors)
-            for idx, _ in enumerate(neighbors):
-                self.connections[id_, idx, 0] = _[0]
-                self.connections[id_, idx, 1] = _[1]
-        return degrees
-
-    # --- META EXTRACTION ---
-    def get_meta(self, left, right):
-        left_idx = torch.LongTensor(left).to(self.device)
-        right_idx = torch.LongTensor(right).to(self.device)
-
-        left_connections = self.connections[left_idx,:,:]
-        left_degrees = self.e1_degrees_tensor[left_idx]
-        right_connections = self.connections[right_idx,:,:]
-        right_degrees = self.e1_degrees_tensor[right_idx]
-        return (left_connections, left_degrees, right_connections, right_degrees)
-
     # --- TRAINING LOOP ---
     def train(self):
         logging.info('START TRAINING...')
@@ -183,28 +133,27 @@ class Trainer(object):
         losses = deque([], self.log_every)
         margins = deque([], self.log_every)
 
-        for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-            support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
+        safer_gen = train_generate_safer(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2, self.grapher)
 
-            support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
-            query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-            false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
+        for data in safer_gen:
+            support_subgraphs, query_subgraphs, false_subgraphs = data
 
-            support = torch.LongTensor(support).pin_memory().to(self.device, non_blocking=True)
-            query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
-            false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
+            support_subgraphs = [ss for ss in support_subgraphs if len(ss) > 0]
+            query_subgraphs = [qs for qs in query_subgraphs if len(qs) > 0]
+            false_subgraphs = [fs for fs in false_subgraphs if len(fs) > 0]
 
+            if len(support_subgraphs) == 0 or len(query_subgraphs) == 0 or len(false_subgraphs) == 0:
+                continue
 
-            if self.no_meta:
-                query_scores = self.matcher(query, support)
-                false_scores = self.matcher(false, support)
-            else:
-                query_scores = self.matcher(query, support, query_meta, support_meta)
-                false_scores = self.matcher(false, support, false_meta, support_meta)
-
-            margin_ = query_scores - false_scores
+            # SAFER matcher: cosine similarities for positive and negative (margin loss)
+            pos_scores = self.matcher(support_subgraphs, query_subgraphs)
+            neg_repr = self.matcher.score_negatives(support_subgraphs, false_subgraphs)
+            pos_scores = pos_scores[:len(neg_repr)]  # align batch
+            # For simplicity: margin loss as in original trainer
+            margin_ = pos_scores - F.cosine_similarity(neg_repr, pos_scores.unsqueeze(1))
             margins.append(margin_.mean().item())
             loss = F.relu(self.margin - margin_).mean()
+
             if self.writer:
                 self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
 
@@ -214,7 +163,7 @@ class Trainer(object):
             self.optim.step()
 
             if self.batch_nums % self.eval_every == 0:
-                hits10, hits5, mrr = self.eval(meta=self.meta)
+                hits10, hits5, mrr = self.eval()
                 if self.writer:
                     self.writer.add_scalar('HITS10', hits10, self.batch_nums)
                     self.writer.add_scalar('HITS5', hits5, self.batch_nums)
@@ -251,7 +200,7 @@ class Trainer(object):
             self.matcher.load_state_dict(state)
 
     # --- EVALUATION ---
-    def eval(self, mode='dev', meta=False):
+    def eval(self, mode='dev'):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
@@ -265,43 +214,21 @@ class Trainer(object):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
-            support_pairs = [[symbol2id[self.escape_token(triple[0])],
-                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
-            if meta:
-                support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
-                support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
-                support_meta = self.get_meta(support_left, support_right)
-
-            support = torch.LongTensor(support_pairs).to(self.device)
-
+            # Create support/query subgraphs for each candidate
+            support_subgraphs = [self.grapher.pair_feature((self.escape_token(triple[0]), self.escape_token(triple[2]))) for triple in support_triples]
             for triple in test_tasks[query_][few:]:
                 true = triple[2]
-                query_pairs = [[symbol2id[self.escape_token(triple[0])], symbol2id[self.escape_token(triple[2])]]]
-                if meta:
-                    query_left = [self.ent2id[self.escape_token(triple[0])]]
-                    query_right = [self.ent2id[self.escape_token(triple[2])]]
-
+                query_subgraphs = [self.grapher.pair_feature((self.escape_token(triple[0]), self.escape_token(triple[2])))]
+                candidate_scores = []
                 for ent in candidates:
-                    e0, er, ent_esc = self.escape_token(triple[0]), self.escape_token(triple[1]), self.escape_token(ent)
-                    if (e0 not in self.e1rel_e2 or
-                        er not in self.e1rel_e2[e0] or
-                        ent_esc not in self.e1rel_e2[e0][er]) and ent != true:
-                        query_pairs.append([symbol2id[ent_esc], symbol2id[e0]])
-                        if meta:
-                            query_left.append(self.ent2id[e0])
-                            query_right.append(self.ent2id[ent_esc])
-
-                query = torch.LongTensor(query_pairs).to(self.device, non_blocking=True)
-                if meta:
-                    query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-                    scores_t = self.matcher(query, support, query_meta, support_meta)
-                else:
-                    scores_t = self.matcher(query, support)
-
-                scores = scores_t.detach().cpu().numpy()
-                sort = list(np.argsort(scores))[::-1]
-                rank = sort.index(0) + 1
+                    # Form new subgraph for each candidate tail
+                    candidate_subgraph = self.grapher.pair_feature((self.escape_token(triple[0]), self.escape_token(ent)))
+                    score = self.matcher(support_subgraphs, [candidate_subgraph]).item()
+                    candidate_scores.append(score)
+                # Compute rank
+                sort = list(np.argsort(candidate_scores))[::-1]
+                rank = sort.index(candidates.index(true)) + 1
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
@@ -326,12 +253,11 @@ class Trainer(object):
     def test_(self):
         self.load()
         logging.info('Pre-trained model loaded')
-        self.eval(mode='dev', meta=self.meta)
-        self.eval(mode='test', meta=self.meta)
+        self.eval(mode='dev')
+        self.eval(mode='test')
 
     def escape_token(self, token):
         return token.replace(" ", "_")
-
 
 if __name__ == '__main__':
     args = read_options()
