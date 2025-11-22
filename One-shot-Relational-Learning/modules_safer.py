@@ -19,6 +19,7 @@ class SAFERSupportAdaptation(nn.Module):
     def forward(self, support_graphs):
         adapted_graphs = []
         for sg in support_graphs:
+            print(f"DEBUG sg shape: {sg.shape}")
             edge_embeds = self.edge_nn(sg)
             weights = torch.sigmoid(edge_embeds.mean(dim=-1, keepdim=True))
             adapted = sg * weights
