@@ -23,10 +23,10 @@ def subgraph(node, connections, k=300, depth=2, mode='random'):
                 if len(connections[node]) == 0:
                     break
                 if d > 0:
-                    # print len(connections[node])
+                    # print(len(connections[node]))
                     step = random.choice(connections[node] + ['STOP'])
                     if step == 'STOP':
-                        # print 'here'
+                        # print('here')
                         break
                     else:
                         path.append(step)
@@ -57,7 +57,6 @@ def subgraph(node, connections, k=300, depth=2, mode='random'):
 
     return graph
 
-
 def combine_vocab(rel2id_path, ent2id_path, rel_emb, ent_emb, symbol2id_path, symbol2vec_path):
     symbol_id = {}
     rel2id = json.load(open(rel2id_path))
@@ -74,7 +73,7 @@ def combine_vocab(rel2id_path, ent2id_path, rel_emb, ent_emb, symbol2id_path, sy
 
     symbol_id['PAD'] = num_symbols
 
-    # print symbol_id['PAD'] # PAD = 69557
+    # print(symbol_id['PAD']) # PAD = 69557
 
     rel_embed = np.loadtxt(rel_emb)
     ent_embed = np.loadtxt(ent_emb)
@@ -121,7 +120,7 @@ class Graph(object):
             new_tracker = defaultdict(set)
             for node in curr_layer:
                 # Stop when node has a very large fan-out
-                # print 'fan-out: ', len(self.connections[node])
+                # print('fan-out: ', len(self.connections[node]))
                 if len(self.connections[node]) > 1000:
                     continue
 
@@ -144,7 +143,7 @@ class Graph(object):
 
     def path_clean(self, path):
         symbols = path.split(' - ')
-        # print 'Uncleaned path: ', symbols   
+        # print('Uncleaned path: ', symbols)   
         entities = []
         for idx, item in enumerate(symbols):
             if idx%2 == 0:
@@ -161,7 +160,7 @@ class Graph(object):
                 if min_idx!=max_idx:
                     symbols = symbols[:min_idx] + symbols[max_idx:]
 
-        # print 'cleaned path: ', symbols
+        # print('cleaned path: ', symbols)
         return ' - '.join(symbols)
 
     def pair_feature(self, pair, k=300, depth=3, mode='random'):
@@ -237,16 +236,15 @@ class Graph(object):
         encoded = np.pad(encoded, (0, seq_len-len(encoded)), 'constant', constant_values=(0, self.symbol2id['PAD']))
         return encoded  
 
-
     def train_generate(self, few=5, batch_size=50, num_neg=1):
         '''
         data generator for training
         '''
         dataset = self.dataset
-        print 'LOAD TRAINING DATA'
+        print('LOAD TRAINING DATA')
         train_tasks = json.load(open(dataset + '/train_tasks.json'))
 
-        print 'BUILD CANDAIDATES FOR EVERY RELATION'
+        print('BUILD CANDAIDATES FOR EVERY RELATION')
         rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
         task_pool = list(train_tasks.keys())
 
@@ -280,7 +278,7 @@ class Graph(object):
                     support_paths.append(self.encode_path(path))
 
             if len(support_paths) == 0:
-                print 'NO PATH FOUND, TRY AGAIN'
+                print('NO PATH FOUND, TRY AGAIN')
                 continue
 
             test_pos_paths = []
@@ -306,8 +304,6 @@ class Graph(object):
 
             assert len(test_pos_paths) == len(test_neg_paths)    
             yield support_paths, test_pos_paths, test_neg_paths
-
-
 
 if __name__ == '__main__':
     combine_vocab('NELL/relation2ids_fix', 'NELL/ent2ids_fix', 'NELL/relation2vec_fix.bern', 'NELL/entity2vec_fix.bern', 'NELL/symbol2ids_fix', 'NELL/symbol2vec_fix.txt')
