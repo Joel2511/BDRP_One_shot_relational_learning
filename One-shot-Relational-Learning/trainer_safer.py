@@ -11,7 +11,7 @@ import os
 import random
 
 from args import read_options
-from data_loader import train_generate_safer # SAFER-specific loader
+from data_loader_safer import train_generate_safer # SAFER-specific loader
 from matcher_safer import SAFERMatcher      # NEW: use the SAFER matcher
 from tensorboardX import SummaryWriter
 from grapher import Graph                   # Needed for extracting subgraphs for SAFER
