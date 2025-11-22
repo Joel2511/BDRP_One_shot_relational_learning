@@ -3,7 +3,7 @@ import argparse
 def read_options():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="NELL", type=str)
-    parser.add_argument("--embed_dim", default=100, type=int)
+    parser.add_argument("--embed_dim", default=200, type=int)
     parser.add_argument("--few", default=1, type=int)
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--neg_num", default=1, type=int)
