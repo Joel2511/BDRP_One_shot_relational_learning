@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 
-from modules import *
+from module_safer import SAFERSupportAdaptation
+from modules import Path
 from torch.autograd import Variable
 
 # === SAFER MATCHER ===
