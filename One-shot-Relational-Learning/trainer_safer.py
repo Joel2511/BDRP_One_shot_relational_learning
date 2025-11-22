@@ -68,7 +68,7 @@ class Trainer(object):
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
         # SAFER: instantiate Graph for extracting subgraphs
-        self.grapher = Graph(self.dataset) 
+        self.grapher = Graph(self.dataset, symbol2id=self.symbol2id) 
 
         print(f"SAFER Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
