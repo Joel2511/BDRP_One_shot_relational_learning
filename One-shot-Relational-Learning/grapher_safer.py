@@ -86,7 +86,7 @@ def combine_vocab(rel2id_path, ent2id_path, rel_emb, ent_emb, symbol2id_path, sy
 
 class Graph(object):
     """methods to process KB"""
-    def __init__(self, path):
+    def __init__(self, path, symbol2id=None):
         super(Graph, self).__init__()
         self.triples = []  # the graph for path finding
         self.dataset = path
@@ -107,7 +107,12 @@ class Graph(object):
             self.connections[e1].append((rel, e2))
             self._connections[e2].append((rel, e1))
 
-        self.symbol2id = json.load(open(path + '/symbol2ids'))
+        # Use provided symbol2id dict if given, else load from file (for backward compatibility)
+        if symbol2id is not None:
+            self.symbol2id = symbol2id
+        else:
+            self.symbol2id = json.load(open(path + '/symbol2ids'))
+
 
 
     def uni_search(self, node_pair, depth=3):
