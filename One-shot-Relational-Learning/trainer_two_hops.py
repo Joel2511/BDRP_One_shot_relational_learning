@@ -1,4 +1,3 @@
-# trainer1_fixed_gpu_2hop.py
 import json
 import logging
 import numpy as np
@@ -25,8 +24,10 @@ class Trainer(object):
 
         # Force GPU usage
         if not torch.cuda.is_available():
-            raise RuntimeError("No GPU found. This trainer requires a GPU.")
-        self.device = torch.device("cuda")
+            self.device = torch.device("cpu")
+            logging.warning("No CUDA found. Running on CPU.")
+        else:
+            self.device = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
 
         self.meta = not self.no_meta
@@ -92,7 +93,7 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
         i = 0
         for key in rel2id.keys():
-            if key not in ['', 'OOV']:
+            if key not in ['','OOV']:
                 symbol_id[key] = i
                 i += 1
         for key in ent2id.keys():
@@ -109,35 +110,64 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        if self.embed_model in ['DistMult', 'TransE', 'ComplEx', 'RESCAL', 'TransH']:
-            ent_embed = np.loadtxt(self.dataset + '/entity2vec.' + self.embed_model)
-            rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)
+        
+        # Determine file paths
+        ent_file = self.dataset + '/entity2vec.' + self.embed_model
+        rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
-            if self.embed_model == 'ComplEx':
-                ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
-                ent_std = np.std(ent_embed, axis=1, keepdims=True)
-                rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
-                rel_std = np.std(rel_embed, axis=1, keepdims=True)
-                eps = 1e-3
-                ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
-                rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
+        if self.embed_model in ['DistMult', 'TransE', 'RESCAL', 'TransH']:
+            # Simple Real-Valued Loading
+            ent_embed = np.loadtxt(ent_file)
+            rel_embed = np.loadtxt(rel_file)
+        
+        elif self.embed_model == 'ComplEx':
+            # --- UNIVERSAL SAFE LOADING (Works for NELL & ATOMIC) ---
+            try:
+                # 1. Try loading as standard floats first (Expected for NELL-One)
+                # If files are already flattened, this works immediately.
+                ent_embed = np.loadtxt(ent_file)
+                rel_embed = np.loadtxt(rel_file)
+                logging.info("Loaded ComplEx embeddings as standard floats (Already flattened).")
+            except ValueError:
+                # 2. If that fails (ValueError: could not convert string...), 
+                # it means we have complex strings (ATOMIC case).
+                # Load as complex and flatten manually.
+                logging.info("Standard load failed. Parsing complex strings and flattening...")
+                
+                ent_embed_complex = np.loadtxt(ent_file, dtype=np.complex64)
+                rel_embed_complex = np.loadtxt(rel_file, dtype=np.complex64)
+                
+                ent_embed = np.concatenate([ent_embed_complex.real, ent_embed_complex.imag], axis=-1)
+                rel_embed = np.concatenate([rel_embed_complex.real, rel_embed_complex.imag], axis=-1)
+            # -------------------------------------------------------
+        else:
+            raise ValueError(f"Unknown embed_model: {self.embed_model}")
 
-            embeddings = []
-            i = 0
-            for key in rel2id.keys():
-                if key not in ['', 'OOV']:
-                    symbol_id[key] = i
-                    i += 1
-                    embeddings.append(list(rel_embed[rel2id[key], :]))
-            for key in ent2id.keys():
-                if key not in ['', 'OOV']:
-                    symbol_id[key] = i
-                    i += 1
-                    embeddings.append(list(ent_embed[ent2id[key], :]))
-            symbol_id['PAD'] = i
-            embeddings.append(list(np.zeros((rel_embed.shape[1],))))
-            self.symbol2id = symbol_id
-            self.symbol2vec = np.array(embeddings)
+        if self.embed_model == 'ComplEx':
+            ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
+            ent_std = np.std(ent_embed, axis=1, keepdims=True)
+            rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
+            rel_std = np.std(rel_embed, axis=1, keepdims=True)
+            eps = 1e-3
+            ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
+            rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
+
+        embeddings = []
+        i = 0
+        for key in rel2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(rel_embed[rel2id[key], :]))
+        for key in ent2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(ent_embed[ent2id[key], :]))
+        symbol_id['PAD'] = i
+        embeddings.append(list(np.zeros((rel_embed.shape[1],))))
+        self.symbol2id = symbol_id
+        self.symbol2vec = np.array(embeddings)
 
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
@@ -150,7 +180,7 @@ class Trainer(object):
 
         with open(self.dataset + '/path_graph') as f:
             lines = f.readlines()
-            for line in tqdm(lines):
+            for line in tqdm(lines, desc="Building 1-hop"):
                 e1, rel, e2 = line.rstrip().split()
                 self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
                 inv_rel = get_inverse_relation(rel)
@@ -168,31 +198,27 @@ class Trainer(object):
                 self.connections[id_, idx, 1] = _[1]
         return degrees
 
-    # --- NEW: 2-hop neighbor building ---
+    # --- 2-HOP NEIGHBOR BUILDING ---
     def build_2hop_connection(self, max_=100):
-        # Allocate a tensor for 2-hop neighbors with same shape as 1-hop connections
         self.connections_2hop = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
-
-        # We use self.e1_rele2 built earlier for 1-hop neighbors
-        # For each entity, get 1-hop neighbors and then 2-hop neighbors from those neighbors
-        for ent, id_ in self.ent2id.items():
+        
+        logging.info("Building 2-hop connections...")
+        for ent, id_ in tqdm(self.ent2id.items(), desc="Building 2-hop"):
             one_hop = self.e1_rele2.get(ent, [])
             two_hop_candidates = []
             for r, e in one_hop:
                 two_hop_neighbors = self.e1_rele2.get(e, [])
                 two_hop_candidates.extend(two_hop_neighbors)
-            # Remove duplicates and self loops if needed
-            # Keep max_ neighbors
+            
             if len(two_hop_candidates) > max_:
                 two_hop_candidates = two_hop_candidates[:max_]
 
             for idx, (rel, ent2) in enumerate(two_hop_candidates):
                 self.connections_2hop[id_, idx, 0] = rel
                 self.connections_2hop[id_, idx, 1] = ent2
-
         return None
 
-    # --- META EXTRACTION with 2-hop inclusion ---
+    # --- META EXTRACTION ---
     def get_meta(self, left, right):
         left_idx = torch.LongTensor(left).to(self.device)
         right_idx = torch.LongTensor(right).to(self.device)
@@ -208,14 +234,20 @@ class Trainer(object):
         return (left_connections_1hop, left_connections_2hop, left_degrees_1hop,
                 right_connections_1hop, right_connections_2hop, right_degrees_1hop)
 
-    # --- TRAINING LOOP ---
+    # --- TRAINING LOOP (Using Generator directly for simplicity/safety) ---
     def train(self):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
         losses = deque([], self.log_every)
         margins = deque([], self.log_every)
 
+        # Note: For full 'num_workers' parallelism, we would need to wrap this in a PyTorch Dataset class.
+        # However, to avoid breaking your custom data loader dependencies, we will stick to the generator
+        # but rely on the optimized evaluation to save time.
+        # If you find training is still too slow, we can revisit wrapping 'train_generate'.
+        
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+            
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
 
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
@@ -236,6 +268,7 @@ class Trainer(object):
             margin_ = query_scores - false_scores
             margins.append(margin_.mean().item())
             loss = F.relu(self.margin - margin_).mean()
+            
             if self.writer:
                 self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
 
@@ -244,25 +277,32 @@ class Trainer(object):
             loss.backward()
             self.optim.step()
 
-            if self.batch_nums % self.eval_every == 0:
+            # Logging
+            if self.batch_nums % self.log_every == 0:
+                avg_loss = np.mean(losses)
+                logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}")
+                if self.writer:
+                    self.writer.add_scalar('Avg_batch_loss', avg_loss, self.batch_nums)
+
+            # Evaluation Trigger
+            if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
                 hits10, hits5, mrr = self.eval(meta=self.meta)
                 if self.writer:
                     self.writer.add_scalar('HITS10', hits10, self.batch_nums)
-                    self.writer.add_scalar('HITS5', hits5, self.batch_nums)
                     self.writer.add_scalar('MAP', mrr, self.batch_nums)
-
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
                     best_hits10 = hits10
 
-            if self.batch_nums % self.log_every == 0:
-                if self.writer:
-                    self.writer.add_scalar('Avg_batch_loss', np.mean(losses), self.batch_nums)
-
             self.batch_nums += 1
             self.scheduler.step()
-            if self.batch_nums == self.max_batches:
+            
+            # Force Final Evaluation
+            if self.batch_nums >= self.max_batches:
+                logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
+                hits10, hits5, mrr = self.eval(meta=self.meta)
+                logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
                 self.save()
                 break
 
@@ -281,59 +321,77 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- EVALUATION ---
+    # --- OPTIMIZED EVALUATION (BATCHED) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
+        # Ensure filename is correct for NELL-One (typically validation_tasks.json)
         test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
-        for query_ in test_tasks.keys():
+        EVAL_BATCH_SIZE = 1024 
+
+        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
-            support_pairs = [
-                [symbol2id[self.escape_token(triple[0])],
-                 symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
+            support_pairs = [[symbol2id[self.escape_token(triple[0])],
+                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
             if meta:
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
+                support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
 
             support = torch.LongTensor(support_pairs).to(self.device)
 
-            for triple in test_tasks[query_][few:]:
+            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
-                query_pairs = [[symbol2id[self.escape_token(triple[0])], symbol2id[self.escape_token(triple[2])]]]
-                if meta:
-                    query_left = [self.ent2id[self.escape_token(triple[0])]]
-                    query_right = [self.ent2id[self.escape_token(triple[2])]]
+                h_esc = self.escape_token(triple[0])
+                r_esc = self.escape_token(triple[1])
+                h_sym = symbol2id[h_esc]
+                h_ent = self.ent2id[h_esc] if meta else None
 
+                valid_candidate_data = [] 
                 for ent in candidates:
-                    e0, er, ent_esc = self.escape_token(triple[0]), self.escape_token(triple[1]), self.escape_token(ent)
-                    if (e0 not in self.e1rel_e2 or
-                        er not in self.e1rel_e2[e0] or
-                        ent_esc not in self.e1rel_e2[e0][er]) and ent != true:
-                        query_pairs.append([symbol2id[ent_esc], symbol2id[e0]])
-                        if meta:
-                            query_left.append(self.ent2id[e0])
-                            query_right.append(self.ent2id[ent_esc])
+                    ent_esc = self.escape_token(ent)
+                    if (h_esc in self.e1rel_e2 and 
+                        r_esc in self.e1rel_e2[h_esc] and 
+                        ent_esc in self.e1rel_e2[h_esc][r_esc]) and ent != true:
+                        continue
+                    t_sym = symbol2id[ent_esc]
+                    t_ent = self.ent2id[ent_esc] if meta else None
+                    valid_candidate_data.append((h_sym, t_sym, h_ent, t_ent))
 
-                query = torch.LongTensor(query_pairs).to(self.device, non_blocking=True)
-                if meta:
-                    query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-                    scores_t = self.matcher(query, support, query_meta, support_meta)
-                else:
-                    scores_t = self.matcher(query, support)
+                true_esc = self.escape_token(true)
+                true_sym = symbol2id[true_esc]
+                true_ent = self.ent2id[true_esc] if meta else None
+                valid_candidate_data.append((h_sym, true_sym, h_ent, true_ent))
+                
+                all_scores = []
+                for i in range(0, len(valid_candidate_data), EVAL_BATCH_SIZE):
+                    batch = valid_candidate_data[i : i + EVAL_BATCH_SIZE]
+                    batch_syms = [[b[0], b[1]] for b in batch]
+                    query_batch = torch.LongTensor(batch_syms).to(self.device)
+                    
+                    if meta:
+                        batch_left = [b[2] for b in batch]
+                        batch_right = [b[3] for b in batch]
+                        query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(batch_left, batch_right))
+                        scores_t = self.matcher(query_batch, support, query_meta, support_meta)
+                    else:
+                        scores_t = self.matcher(query_batch, support)
+                    all_scores.extend(scores_t.detach().cpu().numpy())
 
-                scores = scores_t.detach().cpu().numpy()
-                sort = list(np.argsort(scores))[::-1]
-                rank = sort.index(0) + 1
+                true_score = all_scores[-1]
+                all_scores_np = np.array(all_scores)
+                rank = np.sum(all_scores_np > true_score) + 1
+                
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
@@ -345,8 +403,7 @@ class Trainer(object):
 
             logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
                 query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
-            logging.info('Number of candidates: {}, number of text examples {}'.format(len(candidates), len(hits10_)))
-
+            
         logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
         logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
         logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
@@ -394,4 +451,3 @@ if __name__ == '__main__':
         trainer.test_()
     else:
         trainer.train()
-
