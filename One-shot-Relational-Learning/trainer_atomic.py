@@ -309,62 +309,119 @@ class Trainer(object):
             self.matcher.load_state_dict(state)
 
     # --- EVALUATION (FILE PATH FIX APPLIED) ---
+# --- OPTIMIZED EVALUATION (BATCHED CANDIDATES) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # CRITICAL FIX: Changed /validation_tasks.json to /dev_tasks.json
-        test_tasks = json.load(open(self.dataset + ('/dev_tasks.json' if mode=='dev' else '/test_tasks.json')))
+        # Ensure this points to the correct file
+        test_tasks = json.load(open(self.dataset + ('/dev_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
-        for query_ in test_tasks.keys():
+        # Evaluation Batch Size: Process 1024 candidates at once on GPU
+        # If you get CUDA OOM, reduce this to 512 or 256
+        EVAL_BATCH_SIZE = 1024 
+
+        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
-            support_pairs = [[symbol2id[self.escape_token(triple[0])],
-                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
+            
+            # Support set is constant for the whole task
+            support_pairs = [
+                [symbol2id[self.escape_token(triple[0])],
+                 symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
             if meta:
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
+                # Move support meta to device once
+                support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
 
             support = torch.LongTensor(support_pairs).to(self.device)
 
-            for triple in test_tasks[query_][few:]:
+            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
-                query_pairs = [[symbol2id[self.escape_token(triple[0])], symbol2id[self.escape_token(triple[2])]]]
-                if meta:
-                    query_left = [self.ent2id[self.escape_token(triple[0])]]
-                    query_right = [self.ent2id[self.escape_token(triple[2])]]
+                
+                # Pre-calculate Head info
+                h_esc = self.escape_token(triple[0])
+                r_esc = self.escape_token(triple[1])
+                h_sym = symbol2id[h_esc]
+                
+                # For Meta/2-Hop: We need the Entity ID for graph lookup
+                h_ent = self.ent2id[h_esc] if meta else None
 
+                # --- STEP 1: PREPARE CANDIDATE DATA ---
+                # Store tuples: (Head_Symbol, Tail_Symbol, Head_EntID, Tail_EntID)
+                valid_candidate_data = [] 
+                
                 for ent in candidates:
-                    e0, er, ent_esc = self.escape_token(triple[0]), self.escape_token(triple[1]), self.escape_token(ent)
-                    if (e0 not in self.e1rel_e2 or
-                        er not in self.e1rel_e2[e0] or
-                        ent_esc not in self.e1rel_e2[e0][er]) and ent != true:
-                        query_pairs.append([symbol2id[ent_esc], symbol2id[e0]])
-                        if meta:
-                            query_left.append(self.ent2id[e0])
-                            query_right.append(self.ent2id[ent_esc])
+                    ent_esc = self.escape_token(ent)
+                    
+                    # Filtering: Skip if it is a known fact (but not the target we are predicting)
+                    if (h_esc in self.e1rel_e2 and 
+                        r_esc in self.e1rel_e2[h_esc] and 
+                        ent_esc in self.e1rel_e2[h_esc][r_esc]) and ent != true:
+                        continue
+                    
+                    t_sym = symbol2id[ent_esc]
+                    t_ent = self.ent2id[ent_esc] if meta else None
+                    valid_candidate_data.append((h_sym, t_sym, h_ent, t_ent))
 
-                query = torch.LongTensor(query_pairs).to(self.device, non_blocking=True)
-                if meta:
-                    query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-                    scores_t = self.matcher(query, support, query_meta, support_meta)
-                else:
-                    scores_t = self.matcher(query, support)
+                # Add the TRUE answer to the list last (so we can find its score later)
+                true_esc = self.escape_token(true)
+                true_sym = symbol2id[true_esc]
+                true_ent = self.ent2id[true_esc] if meta else None
+                valid_candidate_data.append((h_sym, true_sym, h_ent, true_ent))
+                
+                # --- STEP 2: PROCESS IN BATCHES ---
+                all_scores = []
+                
+                # Iterate through the valid candidates in chunks
+                for i in range(0, len(valid_candidate_data), EVAL_BATCH_SIZE):
+                    batch = valid_candidate_data[i : i + EVAL_BATCH_SIZE]
+                    
+                    # Prepare Query Tensor (Symbols)
+                    batch_syms = [[b[0], b[1]] for b in batch]
+                    query_batch = torch.LongTensor(batch_syms).to(self.device)
+                    
+                    if meta:
+                        # Prepare Query Meta (Graph/Neighbors)
+                        batch_left = [b[2] for b in batch]
+                        batch_right = [b[3] for b in batch]
+                        
+                        # get_meta handles the neighbor lookup for the whole batch at once
+                        query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(batch_left, batch_right))
+                        
+                        # 2-Hop/Meta Forward Pass
+                        scores_t = self.matcher(query_batch, support, query_meta, support_meta)
+                    else:
+                        # Baseline Forward Pass
+                        scores_t = self.matcher(query_batch, support)
+                    
+                    # Collect scores
+                    all_scores.extend(scores_t.detach().cpu().numpy())
 
-                scores = scores_t.detach().cpu().numpy()
-                sort = list(np.argsort(scores))[::-1]
-                rank = sort.index(0) + 1
+                # --- STEP 3: CALCULATE RANK ---
+                # The true answer is the LAST item in our list/scores
+                true_score = all_scores[-1]
+                
+                # Convert to numpy for fast comparison
+                all_scores_np = np.array(all_scores)
+                
+                # Rank = Number of candidates with score > true_score (plus 1)
+                # This effectively sorts without needing a full sort
+                rank = np.sum(all_scores_np > true_score) + 1
+                
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
+                
                 hits10_.append(1.0 if rank <= 10 else 0.0)
                 hits5_.append(1.0 if rank <= 5 else 0.0)
                 hits1_.append(1.0 if rank <= 1 else 0.0)
@@ -372,8 +429,7 @@ class Trainer(object):
 
             logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
                 query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
-            logging.info('Number of candidates: {}, number of text examples {}'.format(len(candidates), len(hits10_)))
-
+            
         logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
         logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
         logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
