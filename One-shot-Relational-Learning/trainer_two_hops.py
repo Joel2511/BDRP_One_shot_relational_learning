@@ -1,3 +1,4 @@
+# trainer1_fixed_gpu_2hop.py (OPTIMIZED FOR WHOLE NELL-ONE)
 import json
 import logging
 import numpy as np
@@ -111,35 +112,27 @@ class Trainer(object):
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
         
-        # Determine file paths
+        # Paths
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
         if self.embed_model in ['DistMult', 'TransE', 'RESCAL', 'TransH']:
-            # Simple Real-Valued Loading
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
         
         elif self.embed_model == 'ComplEx':
-            # --- UNIVERSAL SAFE LOADING (Works for NELL & ATOMIC) ---
+            # --- UNIVERSAL SAFE LOADING ---
+            # 1. Try loading as standard floats first (Works for your existing NELL files)
             try:
-                # 1. Try loading as standard floats first (Expected for NELL-One)
-                # If files are already flattened, this works immediately.
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
-                logging.info("Loaded ComplEx embeddings as standard floats (Already flattened).")
             except ValueError:
-                # 2. If that fails (ValueError: could not convert string...), 
-                # it means we have complex strings (ATOMIC case).
-                # Load as complex and flatten manually.
-                logging.info("Standard load failed. Parsing complex strings and flattening...")
-                
-                ent_embed_complex = np.loadtxt(ent_file, dtype=np.complex64)
-                rel_embed_complex = np.loadtxt(rel_file, dtype=np.complex64)
-                
-                ent_embed = np.concatenate([ent_embed_complex.real, ent_embed_complex.imag], axis=-1)
-                rel_embed = np.concatenate([rel_embed_complex.real, rel_embed_complex.imag], axis=-1)
-            # -------------------------------------------------------
+                # 2. Fallback for Complex strings (Safety net)
+                logging.info("Standard load failed. Parsing complex strings...")
+                ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
+                rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
+                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
+                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
         else:
             raise ValueError(f"Unknown embed_model: {self.embed_model}")
 
@@ -201,7 +194,6 @@ class Trainer(object):
     # --- 2-HOP NEIGHBOR BUILDING ---
     def build_2hop_connection(self, max_=100):
         self.connections_2hop = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
-        
         logging.info("Building 2-hop connections...")
         for ent, id_ in tqdm(self.ent2id.items(), desc="Building 2-hop"):
             one_hop = self.e1_rele2.get(ent, [])
@@ -234,18 +226,13 @@ class Trainer(object):
         return (left_connections_1hop, left_connections_2hop, left_degrees_1hop,
                 right_connections_1hop, right_connections_2hop, right_degrees_1hop)
 
-    # --- TRAINING LOOP (Using Generator directly for simplicity/safety) ---
+    # --- TRAINING LOOP ---
     def train(self):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
         losses = deque([], self.log_every)
         margins = deque([], self.log_every)
 
-        # Note: For full 'num_workers' parallelism, we would need to wrap this in a PyTorch Dataset class.
-        # However, to avoid breaking your custom data loader dependencies, we will stick to the generator
-        # but rely on the optimized evaluation to save time.
-        # If you find training is still too slow, we can revisit wrapping 'train_generate'.
-        
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
@@ -277,14 +264,12 @@ class Trainer(object):
             loss.backward()
             self.optim.step()
 
-            # Logging
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
                 logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}")
                 if self.writer:
                     self.writer.add_scalar('Avg_batch_loss', avg_loss, self.batch_nums)
 
-            # Evaluation Trigger
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
                 hits10, hits5, mrr = self.eval(meta=self.meta)
                 if self.writer:
@@ -298,7 +283,7 @@ class Trainer(object):
             self.batch_nums += 1
             self.scheduler.step()
             
-            # Force Final Evaluation
+            # Ensure final evaluation happens
             if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
                 hits10, hits5, mrr = self.eval(meta=self.meta)
@@ -321,14 +306,14 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- OPTIMIZED EVALUATION (BATCHED) ---
+    # --- OPTIMIZED EVALUATION (BATCHED for Whole Dataset Speed) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Ensure filename is correct for NELL-One (typically validation_tasks.json)
+        # Uses validation_tasks.json (Standard for NELL)
         test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
@@ -339,6 +324,7 @@ class Trainer(object):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
+            
             support_pairs = [[symbol2id[self.escape_token(triple[0])],
                               symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
@@ -396,6 +382,7 @@ class Trainer(object):
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
+                
                 hits10_.append(1.0 if rank <= 10 else 0.0)
                 hits5_.append(1.0 if rank <= 5 else 0.0)
                 hits1_.append(1.0 if rank <= 1 else 0.0)
