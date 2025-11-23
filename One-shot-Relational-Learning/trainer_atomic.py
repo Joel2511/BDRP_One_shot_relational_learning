@@ -280,8 +280,16 @@ class Trainer(object):
 
             self.batch_nums += 1
             self.scheduler.step()
-            if self.batch_nums >= self.max_batches: # Use >= for safety
-                logging.critical(f"Max batches ({self.max_batches}) reached. Saving final model.")
+            
+            # --- CRITICAL FIX: Run final evaluation if max batches is reached ---
+            if self.batch_nums >= self.max_batches: 
+                logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
+                
+                # Execute the evaluation now (assuming eval() is safe to run)
+                hits10, hits5, mrr = self.eval(meta=self.meta) 
+                
+                logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
+                
                 self.save()
                 break
 
