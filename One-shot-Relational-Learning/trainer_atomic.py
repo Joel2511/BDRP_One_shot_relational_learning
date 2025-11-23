@@ -308,113 +308,91 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- EVALUATION (FILE PATH FIX APPLIED) ---
-# --- OPTIMIZED EVALUATION (BATCHED CANDIDATES) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Ensure this points to the correct file
         test_tasks = json.load(open(self.dataset + ('/dev_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
-        # Evaluation Batch Size: Process 1024 candidates at once on GPU
-        # If you get CUDA OOM, reduce this to 512 or 256
-        EVAL_BATCH_SIZE = 1024 
+        # SETTINGS FOR SPEED
+        EVAL_BATCH_SIZE = 1024
+        SAMPLE_SIZE = 1000  # <--- CRITICAL: Rank against 1000 candidates instead of 600k
 
         for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
-            candidates = rel2candidates[query_]
-            support_triples = test_tasks[query_][:few]
+            all_candidates = rel2candidates[query_] # This is usually huge (100k+)
             
-            # Support set is constant for the whole task
-            support_pairs = [
-                [symbol2id[self.escape_token(triple[0])],
-                 symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
+            support_triples = test_tasks[query_][:few]
+            support_pairs = [[symbol2id[self.escape_token(triple[0])],
+                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
             if meta:
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
-                # Move support meta to device once
                 support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
 
             support = torch.LongTensor(support_pairs).to(self.device)
 
             for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
-                
-                # Pre-calculate Head info
                 h_esc = self.escape_token(triple[0])
                 r_esc = self.escape_token(triple[1])
                 h_sym = symbol2id[h_esc]
-                
-                # For Meta/2-Hop: We need the Entity ID for graph lookup
                 h_ent = self.ent2id[h_esc] if meta else None
 
-                # --- STEP 1: PREPARE CANDIDATE DATA ---
-                # Store tuples: (Head_Symbol, Tail_Symbol, Head_EntID, Tail_EntID)
-                valid_candidate_data = [] 
+                # --- SAMPLING STEP (The Speed Fix) ---
+                # 1. Always include the TRUE answer
+                # 2. Randomly sample negatives to reach SAMPLE_SIZE
                 
-                for ent in candidates:
+                current_candidates = [true] # Start with truth
+                
+                # If total candidates > SAMPLE_SIZE, sample randomly
+                if len(all_candidates) > SAMPLE_SIZE:
+                    # Randomly pick negatives (excluding True is ideal but rare collision is ok for speed)
+                    negs = random.sample(all_candidates, SAMPLE_SIZE)
+                    for n in negs:
+                        if n != true:
+                            current_candidates.append(n)
+                    # Trim to exactly SAMPLE_SIZE + 1 (or close to it)
+                    current_candidates = current_candidates[:SAMPLE_SIZE+1]
+                else:
+                    current_candidates = all_candidates
+
+                # --- PREPARE BATCH ---
+                valid_candidate_data = []
+                for ent in current_candidates:
                     ent_esc = self.escape_token(ent)
-                    
-                    # Filtering: Skip if it is a known fact (but not the target we are predicting)
-                    if (h_esc in self.e1rel_e2 and 
-                        r_esc in self.e1rel_e2[h_esc] and 
-                        ent_esc in self.e1rel_e2[h_esc][r_esc]) and ent != true:
-                        continue
-                    
                     t_sym = symbol2id[ent_esc]
                     t_ent = self.ent2id[ent_esc] if meta else None
                     valid_candidate_data.append((h_sym, t_sym, h_ent, t_ent))
 
-                # Add the TRUE answer to the list last (so we can find its score later)
-                true_esc = self.escape_token(true)
-                true_sym = symbol2id[true_esc]
-                true_ent = self.ent2id[true_esc] if meta else None
-                valid_candidate_data.append((h_sym, true_sym, h_ent, true_ent))
-                
-                # --- STEP 2: PROCESS IN BATCHES ---
+                # --- PROCESS ---
                 all_scores = []
-                
-                # Iterate through the valid candidates in chunks
                 for i in range(0, len(valid_candidate_data), EVAL_BATCH_SIZE):
                     batch = valid_candidate_data[i : i + EVAL_BATCH_SIZE]
-                    
-                    # Prepare Query Tensor (Symbols)
                     batch_syms = [[b[0], b[1]] for b in batch]
                     query_batch = torch.LongTensor(batch_syms).to(self.device)
                     
                     if meta:
-                        # Prepare Query Meta (Graph/Neighbors)
                         batch_left = [b[2] for b in batch]
                         batch_right = [b[3] for b in batch]
-                        
-                        # get_meta handles the neighbor lookup for the whole batch at once
                         query_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(batch_left, batch_right))
-                        
-                        # 2-Hop/Meta Forward Pass
                         scores_t = self.matcher(query_batch, support, query_meta, support_meta)
                     else:
-                        # Baseline Forward Pass
                         scores_t = self.matcher(query_batch, support)
-                    
-                    # Collect scores
                     all_scores.extend(scores_t.detach().cpu().numpy())
 
-                # --- STEP 3: CALCULATE RANK ---
-                # The true answer is the LAST item in our list/scores
-                true_score = all_scores[-1]
-                
-                # Convert to numpy for fast comparison
+                # --- RANKING ---
+                # The TRUE answer is at index 0 (because we put it there first)
+                true_score = all_scores[0]
                 all_scores_np = np.array(all_scores)
                 
-                # Rank = Number of candidates with score > true_score (plus 1)
-                # This effectively sorts without needing a full sort
+                # Rank is how many candidates have a score >= true_score
                 rank = np.sum(all_scores_np > true_score) + 1
                 
                 hits10.append(1.0 if rank <= 10 else 0.0)
