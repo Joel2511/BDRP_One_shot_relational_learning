@@ -317,7 +317,6 @@ class Trainer(object):
             self.matcher.load_state_dict(state)
 
     # --- EVALUATION ---
-# --- OPTIMIZED EVALUATION (SAMPLED + BATCHED) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
@@ -330,11 +329,12 @@ class Trainer(object):
 
         # SETTINGS FOR SPEED
         EVAL_BATCH_SIZE = 1024
-        SAMPLE_SIZE = 1000  # <--- CRITICAL: Rank against 1000 candidates instead of 600k
+        SAMPLE_SIZE = 1000 
 
-        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
+        # Outer Loop: Updates at most every 10 seconds
+        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations", mininterval=10.0):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
-            all_candidates = rel2candidates[query_] # This is usually huge (100k+)
+            all_candidates = rel2candidates[query_]
             
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[self.escape_token(triple[0])],
@@ -348,27 +348,21 @@ class Trainer(object):
 
             support = torch.LongTensor(support_pairs).to(self.device)
 
-            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
+            # Inner Loop: Updates at most every 30 seconds (Prevents log spam)
+            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False, mininterval=30.0):
                 true = triple[2]
                 h_esc = self.escape_token(triple[0])
                 r_esc = self.escape_token(triple[1])
                 h_sym = symbol2id[h_esc]
                 h_ent = self.ent2id[h_esc] if meta else None
 
-                # --- SAMPLING STEP (The Speed Fix) ---
-                # 1. Always include the TRUE answer
-                # 2. Randomly sample negatives to reach SAMPLE_SIZE
-                
-                current_candidates = [true] # Start with truth
-                
-                # If total candidates > SAMPLE_SIZE, sample randomly
+                # --- SAMPLING STEP ---
+                current_candidates = [true] 
                 if len(all_candidates) > SAMPLE_SIZE:
-                    # Randomly pick negatives (excluding True is ideal but rare collision is ok for speed)
                     negs = random.sample(all_candidates, SAMPLE_SIZE)
                     for n in negs:
                         if n != true:
                             current_candidates.append(n)
-                    # Trim to exactly SAMPLE_SIZE + 1 (or close to it)
                     current_candidates = current_candidates[:SAMPLE_SIZE+1]
                 else:
                     current_candidates = all_candidates
@@ -398,11 +392,8 @@ class Trainer(object):
                     all_scores.extend(scores_t.detach().cpu().numpy())
 
                 # --- RANKING ---
-                # The TRUE answer is at index 0 (because we put it there first)
-                true_score = all_scores[0]
+                true_score = all_scores[0] # True answer is always at index 0
                 all_scores_np = np.array(all_scores)
-                
-                # Rank is how many candidates have a score >= true_score
                 rank = np.sum(all_scores_np > true_score) + 1
                 
                 hits10.append(1.0 if rank <= 10 else 0.0)
