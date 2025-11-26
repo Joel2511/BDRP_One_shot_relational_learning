@@ -50,43 +50,63 @@ class EmbedMatcher(nn.Module):
 
     def neighbor_encoder(self, connections, num_neighbors):
         '''
-        connections: (batch, 200, 2)
-        num_neighbors: (batch,)
+        connections: (batch, max_neighbors, 2)
+        num_neighbors: (batch,)  -- degrees for the corresponding neighbor list
         '''
-        num_neighbors = num_neighbors.unsqueeze(1)  # (batch,1)
-        relations = connections[:,:,0].squeeze(-1)
-        entities = connections[:,:,1].squeeze(-1)
-        rel_embeds = self.dropout(self.symbol_emb(relations)) # (batch, 200, embed_dim)
-        ent_embeds = self.dropout(self.symbol_emb(entities)) # (batch, 200, embed_dim)
-
-        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1) # (batch, 200, 2*embed_dim)
-
-        # --- Gating mechanism applied here ---
-        gate_values = torch.sigmoid(self.gate_linear(concat_embeds))  # (batch, 200, 1)
-        gated_embeds = gate_values * concat_embeds  # Element-wise multiplication
-
-        # Project gated embeddings to embed_dim
-        projected = self.gcn_w(gated_embeds) + self.gcn_b  # (batch, 200, embed_dim)
-
-        # --- Attention mechanism applied here ---
-        # Compute attention scores
-        attn_scores = self.attn_linear(projected).squeeze(-1)  # (batch, 200)
-        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)  # (batch, 200, 1)
-
-        # Weighted sum of neighbors
+        # relations/entities: (batch, max_neighbors)
+        relations = connections[..., 0]
+        entities = connections[..., 1]
+    
+        # embeddings
+        rel_embeds = self.dropout(self.symbol_emb(relations))  # (batch, M, embed_dim)
+        ent_embeds = self.dropout(self.symbol_emb(entities))   # (batch, M, embed_dim)
+    
+        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)  # (batch, M, 2*embed_dim)
+    
+        # gating (scalar gate per neighbor)
+        gate_values = torch.sigmoid(self.gate_linear(concat_embeds))  # (batch, M, 1)
+        gated_embeds = gate_values * concat_embeds  # broadcast -> (batch, M, 2*embed_dim)
+    
+        # project to embed dim
+        projected = self.gcn_w(gated_embeds) + self.gcn_b  # (batch, M, embed_dim)
+    
+        # build mask for non-PAD neighbors
+        mask = (entities != self.pad_idx)  # (batch, M) boolean
+        # convert mask to float for safe math later if needed
+        mask_float = mask.float().unsqueeze(-1)  # (batch, M, 1)
+    
+        # attention scores (before softmax)
+        attn_scores = self.attn_linear(projected).squeeze(-1)  # (batch, M)
+    
+        # mask attention scores so PAD positions get -inf (practically large negative)
+        attn_scores = attn_scores.masked_fill(~mask, float('-1e9'))
+    
+        # softmax over neighbor dim
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)  # (batch, M, 1)
+    
+        # weighted sum (softmax already normalizes)
         out = torch.sum(projected * attn_weights, dim=1)  # (batch, embed_dim)
-
-        # Normalize by number of neighbors to keep scale consistent
-        out = out / num_neighbors
-
+    
+        # avoid dividing by num_neighbors — softmax normalizes already.
+        # If you still want average behavior, use:
+        # nn_counts = mask.sum(dim=1).clamp(min=1).unsqueeze(-1).float()
+        # out = out / nn_counts
+    
         return out.tanh()
 
+
     # encode_neighbors updated to use gated + attentive neighbor_encoder implicitly
-    def encode_neighbors(self, neighbors_1hop, neighbors_2hop, degrees):
-        enc_1hop = self.neighbor_encoder(neighbors_1hop, degrees)
-        enc_2hop = self.neighbor_encoder(neighbors_2hop, degrees)
-        combined = enc_1hop + enc_2hop  # sum aggregation; can consider concat or weighted sum later
+    def encode_neighbors(self, neighbors_1hop, neighbors_2hop, degrees_1hop, degrees_2hop=None):
+        # degrees_2hop optional; if not provided we'll compute counts from neighbors_2hop mask
+        enc_1hop = self.neighbor_encoder(neighbors_1hop, degrees_1hop)
+        # compute 2-hop degrees if not passed
+        if degrees_2hop is None:
+            entities_2hop = neighbors_2hop[..., 1]
+            degrees_2hop = (entities_2hop != self.pad_idx).sum(dim=1).float()
+        enc_2hop = self.neighbor_encoder(neighbors_2hop, degrees_2hop)
+        combined = enc_1hop + enc_2hop
         return combined
+
 
     def forward(self, query, support, query_meta=None, support_meta=None):
         '''
