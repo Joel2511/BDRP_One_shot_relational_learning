@@ -1,4 +1,4 @@
-# trainer1_fixed_gpu_2hop.py (OPTIMIZED FOR WHOLE NELL-ONE)
+# trainer_2_hops.py (patched for 2-hop matcher)
 import json
 import logging
 import numpy as np
@@ -23,12 +23,10 @@ class Trainer(object):
         for k, v in vars(arg).items():
             setattr(self, k, v)
 
-        # Force GPU usage
-        if not torch.cuda.is_available():
-            self.device = torch.device("cpu")
-            logging.warning("No CUDA found. Running on CPU.")
-        else:
-            self.device = torch.device("cuda")
+        # Device setup
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if self.device.type == 'cpu':
+            logging.warning("CUDA not available. Running on CPU.")
         torch.backends.cudnn.benchmark = True
 
         self.meta = not self.no_meta
@@ -72,10 +70,10 @@ class Trainer(object):
         self.num_ents = len(self.ent2id.keys())
 
         logging.info('BUILDING CONNECTION MATRIX (1-hop and 2-hop)')
-        degrees = self.build_connection(max_=self.max_neighbor)
-        degrees_2hop = self.build_2hop_connection(max_=self.max_neighbor)
+        self.degrees = self.build_connection(max_=self.max_neighbor)
+        self.build_2hop_connection(max_=self.max_neighbor)
 
-        logging.info('LOADING CANDIDATES ENTITIES')
+        logging.info('LOADING CANDIDATE ENTITIES')
         self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json'))
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
@@ -85,7 +83,7 @@ class Trainer(object):
         e1_degrees_list = [float(self.e1_degrees.get(i, 0)) for i in range(self.num_ents)]
         self.e1_degrees_tensor = torch.FloatTensor(e1_degrees_list).to(self.device)
 
-        print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
+        print(f"Trainer initialized. Device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
     # --- SYMBOL / EMBEDDING LOADERS ---
     def load_symbol2id(self):
@@ -111,23 +109,17 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        
-        # Paths
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
         if self.embed_model in ['DistMult', 'TransE', 'RESCAL', 'TransH']:
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
-        
         elif self.embed_model == 'ComplEx':
-            # --- UNIVERSAL SAFE LOADING ---
-            # 1. Try loading as standard floats first (Works for your existing NELL files)
             try:
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
             except ValueError:
-                # 2. Fallback for Complex strings (Safety net)
                 logging.info("Standard load failed. Parsing complex strings...")
                 ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
                 rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
@@ -201,7 +193,7 @@ class Trainer(object):
             for r, e in one_hop:
                 two_hop_neighbors = self.e1_rele2.get(e, [])
                 two_hop_candidates.extend(two_hop_neighbors)
-            
+
             if len(two_hop_candidates) > max_:
                 two_hop_candidates = two_hop_candidates[:max_]
 
@@ -283,7 +275,6 @@ class Trainer(object):
             self.batch_nums += 1
             self.scheduler.step()
             
-            # Ensure final evaluation happens
             if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
                 hits10, hits5, mrr = self.eval(meta=self.meta)
@@ -306,14 +297,13 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- OPTIMIZED EVALUATION (BATCHED for Whole Dataset Speed) ---
+    # --- EVALUATION ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Uses validation_tasks.json (Standard for NELL)
         test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
