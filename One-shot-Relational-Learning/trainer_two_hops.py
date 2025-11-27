@@ -203,20 +203,23 @@ class Trainer(object):
         return None
 
     # --- META EXTRACTION ---
+# --- META EXTRACTION ---
     def get_meta(self, left, right):
         left_idx = torch.LongTensor(left).to(self.device)
         right_idx = torch.LongTensor(right).to(self.device)
-
+    
         left_connections_1hop = self.connections[left_idx, :, :]
         left_connections_2hop = self.connections_2hop[left_idx, :, :]
         left_degrees_1hop = self.e1_degrees_tensor[left_idx]
-
+    
         right_connections_1hop = self.connections[right_idx, :, :]
         right_connections_2hop = self.connections_2hop[right_idx, :, :]
         right_degrees_1hop = self.e1_degrees_tensor[right_idx]
-
+    
+        # return device tensors directly
         return (left_connections_1hop, left_connections_2hop, left_degrees_1hop,
                 right_connections_1hop, right_connections_2hop, right_degrees_1hop)
+
 
     # --- TRAINING LOOP ---
     def train(self):
@@ -254,7 +257,14 @@ class Trainer(object):
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
+            
+            if self.writer:
+                gate_weights = F.softmax(self.matcher.hop_gate, dim=0).detach().cpu().numpy()
+                self.writer.add_scalar('Gate/1hop', gate_weights[0], self.batch_nums)
+                self.writer.add_scalar('Gate/2hop', gate_weights[1], self.batch_nums)
+            
             self.optim.step()
+
 
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
