@@ -76,48 +76,43 @@ class EmbedMatcher(nn.Module):
         return torch.tanh(neigh_vec)
 
     def forward(self, query, support, query_meta=None, support_meta=None):
-        # baseline fallback
         if (query_meta is None) or (support_meta is None):
-            support = self.dropout(self.symbol_emb(support)).view(-1, 2 * self.embed_dim)
-            query = self.dropout(self.symbol_emb(query)).view(-1, 2 * self.embed_dim)
-
+            # fallback: same as baseline
+            support = self.dropout(self.symbol_emb(support)).view(-1, 2*self.embed_dim)
+            query = self.dropout(self.symbol_emb(query)).view(-1, 2*self.embed_dim)
             support = support.unsqueeze(0)
             support_g = self.support_encoder(support).squeeze(0)
             query_f = self.query_encoder(support_g, query)
             return torch.matmul(query_f, support_g.t()).squeeze()
-
-        # unpack metadata
+    
         (q_l1, q_l2, q_deg_l, q_r1, q_r2, q_deg_r) = query_meta
         (s_l1, s_l2, s_deg_l, s_r1, s_r2, s_deg_r) = support_meta
-
-        # neighbor encodings
+    
+        # encode neighbors per hop
         q_left_1 = self.neighbor_encoder(q_l1, q_deg_l)
         q_left_2 = self.neighbor_encoder(q_l2, q_deg_l)
         q_right_1 = self.neighbor_encoder(q_r1, q_deg_r)
         q_right_2 = self.neighbor_encoder(q_r2, q_deg_r)
-
+    
         s_left_1 = self.neighbor_encoder(s_l1, s_deg_l)
         s_left_2 = self.neighbor_encoder(s_l2, s_deg_l)
         s_right_1 = self.neighbor_encoder(s_r1, s_deg_r)
         s_right_2 = self.neighbor_encoder(s_r2, s_deg_r)
-
-        # gating
-        gate_weights = F.softmax(self.hop_gate, dim=0)
-
+    
+        # combine hops using gating (softmax normalized)
+        gate_weights = F.softmax(self.hop_gate, dim=0)  # two weights sum to 1
         q_left = gate_weights[0] * q_left_1 + gate_weights[1] * q_left_2
         q_right = gate_weights[0] * q_right_1 + gate_weights[1] * q_right_2
         s_left = gate_weights[0] * s_left_1 + gate_weights[1] * s_left_2
         s_right = gate_weights[0] * s_right_1 + gate_weights[1] * s_right_2
-
-        query_neighbor = torch.cat((q_left, q_right), dim=-1)     # (batch, 2*dim)
-        support_neighbor = torch.cat((s_left, s_right), dim=-1)   # (batch, 2*dim)
-
-        # encoding
-        support_g = self.support_encoder(support_neighbor.unsqueeze(0)).squeeze(0)
-        support_g = torch.mean(support_g, dim=0, keepdim=True)
-
+    
+        query_neighbor = torch.cat((q_left, q_right), dim=-1)
+        support_neighbor = torch.cat((s_left, s_right), dim=-1)
+    
+        support_g = self.support_encoder(support_neighbor)
         query_g = self.query_encoder(support_g, query_neighbor)
-
-        # final score
+        support_g = torch.mean(support_g, dim=0, keepdim=True)
+    
         matching_scores = torch.matmul(query_g, support_g.t()).squeeze()
         return matching_scores
+
