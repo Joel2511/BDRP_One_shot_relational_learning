@@ -13,7 +13,7 @@ import random
 from args import read_options
 from data_loader import *
 # --- CRITICAL: Import the Gated 1-Hop Matcher ---
-from matcher_one_hop_gated import EmbedMatcher 
+from matcher_one_hop import EmbedMatcher 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
