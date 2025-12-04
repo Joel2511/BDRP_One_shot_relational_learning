@@ -13,7 +13,7 @@ import random
 from args import read_options
 from data_loader import *
 # --- CRITICAL: Import the Gated 1-Hop Matcher ---
-from matcher_one_hop import EmbedMatcher 
+from matcher_one_hop_gated import EmbedMatcher 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
@@ -332,10 +332,17 @@ class Trainer(object):
                 all_scores_np = np.array(all_scores)
                 rank = np.sum(all_scores_np > true_score) + 1
                 
+                # Global Metrics
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
+
+                # --- FIX: Per-Relation Metrics ---
+                hits10_.append(1.0 if rank <= 10 else 0.0)
+                hits5_.append(1.0 if rank <= 5 else 0.0)
+                hits1_.append(1.0 if rank <= 1 else 0.0)
+                mrr_.append(1.0 / rank)
 
             logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
                 query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
