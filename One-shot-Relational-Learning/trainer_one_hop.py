@@ -13,7 +13,7 @@ import random
 from args import read_options
 from data_loader import *
 # --- CRITICAL: Import the Gated 1-Hop Matcher ---
-from matcher_one_hop import EmbedMatcher 
+from matcher_one_hop_gated import EmbedMatcher 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
@@ -265,7 +265,8 @@ class Trainer(object):
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        test_tasks = json.load(open(self.dataset + ('/dev_tasks.json' if mode == 'dev' else '/test_tasks.json')))
+        # Modified line to use validation_tasks.json for dev mode
+        test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
