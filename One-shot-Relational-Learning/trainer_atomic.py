@@ -1,4 +1,3 @@
-# trainer_atomic.py (MODIFIED FOR DEBUGGING AND ATOMIC STABILITY)
 import json
 import logging
 import numpy as np
@@ -12,8 +11,8 @@ import os
 import random
 
 from args import read_options
-from data_loader import * # Assuming this contains train_generate
-from matcher import * # Assuming this contains EmbedMatcher
+from data_loader import *
+from matcher import *
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
@@ -24,9 +23,8 @@ class Trainer(object):
 
         # Force GPU usage
         if not torch.cuda.is_available():
-            # NOTE: Removed the RuntimeError for debug runs, but keep this check
             self.device = torch.device("cpu")
-            logging.warning("No CUDA found. Running on CPU, expect extreme slowness.")
+            logging.warning("No CUDA found. Running on CPU.")
         else:
             self.device = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
@@ -39,7 +37,7 @@ class Trainer(object):
             self.load_symbol2id()
             use_pretrain = False
         else:
-            self.load_embed() # <--- CALLS THE EMBEDDING LOADER
+            self.load_embed()
         self.use_pretrain = use_pretrain
 
         self.num_symbols = len(self.symbol2id.keys()) - 1
@@ -75,7 +73,7 @@ class Trainer(object):
         degrees = self.build_connection(max_=self.max_neighbor)
 
         logging.info('LOADING CANDIDATES ENTITIES')
-        self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json'))  
+        self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json')) 
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
         # Move large static tensors to GPU
@@ -85,7 +83,7 @@ class Trainer(object):
 
         print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
-    # --- SYMBOL / EMBEDDING LOADERS (COMPLLEX FIX APPLIED) ---
+    # --- UNIVERSAL SAFE LOADING ---
     def load_symbol2id(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
@@ -109,42 +107,30 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
+        
+        ent_file = self.dataset + '/entity2vec.' + self.embed_model
+        rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
         if self.embed_model in ['DistMult', 'TransE', 'RESCAL','TransH']:
-            # Normal loading for purely real-valued models
-            ent_embed = np.loadtxt(self.dataset + '/entity2vec.' + self.embed_model)
-            rel_embed = np.loadtxt(self.dataset + '/relation2vec.' + self.embed_model)
+            ent_embed = np.loadtxt(ent_file)
+            rel_embed = np.loadtxt(rel_file)
         
         elif self.embed_model == 'ComplEx':
-            # --- START OF COMPLLEX FIX ---
-            ent_file = self.dataset + '/entity2vec.' + self.embed_model
-            rel_file = self.dataset + '/relation2vec.' + self.embed_model
-            
             try:
-                # 1. Attempt to load the data specifying the complex data type (dytpe=np.complex64).
-                ent_embed_complex = np.loadtxt(ent_file, dtype=np.complex64)
-                rel_embed_complex = np.loadtxt(rel_file, dtype=np.complex64)
-                
-                # 2. Flatten the complex array into a real-valued array (Real | Imaginary)
-                ent_embed = np.concatenate([ent_embed_complex.real, ent_embed_complex.imag], axis=-1)
-                rel_embed = np.concatenate([rel_embed_complex.real, rel_embed_complex.imag], axis=-1)
-                
-                logging.info('ComplEx embeddings loaded and flattened successfully.')
-
-            except ValueError as e:
-                # Fallback to standard float loading if complex format fails (assuming manual pre-flattening)
-                if 'to float' in str(e) or 'complex' in str(e):
-                    logging.warning(f"Complex loading failed (Error: {e}). Trying to load as standard floats.")
-                    ent_embed = np.loadtxt(ent_file)
-                    rel_embed = np.loadtxt(rel_file)
-                else:
-                    raise e
-            # --- END OF COMPLLEX FIX ---
-        
+                # Try float first (NELL style)
+                ent_embed = np.loadtxt(ent_file)
+                rel_embed = np.loadtxt(rel_file)
+                logging.info("Loaded ComplEx as standard floats.")
+            except ValueError:
+                # Try complex string (ATOMIC style)
+                logging.info("Standard load failed. Flattening complex strings...")
+                ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
+                rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
+                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
+                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
         else:
             raise ValueError(f"Unknown embed_model: {self.embed_model}")
-        
-        # --- ComplEx Normalization (Applied only if ComplEx was the chosen model) ---
+
         if self.embed_model == 'ComplEx':
             ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
             ent_std = np.std(ent_embed, axis=1, keepdims=True)
@@ -153,8 +139,7 @@ class Trainer(object):
             eps = 1e-3
             ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
             rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
-        
-        # --- Common Symbol Mapping Logic ---
+
         embeddings = []
         i = 0
         for key in rel2id.keys():
@@ -168,8 +153,7 @@ class Trainer(object):
                 i += 1
                 embeddings.append(list(ent_embed[ent2id[key],:]))
         symbol_id['PAD'] = i
-        # Ensure padding vector has the correct flattened dimension (2*D)
-        embeddings.append(list(np.zeros((rel_embed.shape[1],)))) 
+        embeddings.append(list(np.zeros((rel_embed.shape[1],))))
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
 
@@ -182,10 +166,9 @@ class Trainer(object):
         def get_inverse_relation(rel):
             return rel if rel.endswith('_inv') else rel + '_inv'
 
-        # Use tqdm here for progress update on the most time-consuming step before training
         with open(self.dataset + '/path_graph') as f:
             lines = f.readlines()
-            for line in tqdm(lines, desc="Building Connection Matrix"): 
+            for line in tqdm(lines, desc="Building Connections"):
                 e1, rel, e2 = line.rstrip().split()
                 self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
                 inv_rel = get_inverse_relation(rel)
@@ -214,29 +197,24 @@ class Trainer(object):
         right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
 
-    # --- TRAINING LOOP (LOGGING AND EVAL FIXES APPLIED) ---
+    # --- TRAINING LOOP ---
     def train(self):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
         losses = deque([], self.log_every)
         margins = deque([], self.log_every)
-        
-        logging.info('LOADING TRAINING DATA (This may be the slow step)')
 
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-            
-            # --- BATCH PREPARATION ---
             support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
 
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
-            query_meta  = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-            false_meta  = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
+            query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
+            false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
 
             support = torch.LongTensor(support).pin_memory().to(self.device, non_blocking=True)
             query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
             false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
 
-            # --- FORWARD PASS ---
             if self.no_meta:
                 query_scores = self.matcher(query, support)
                 false_scores = self.matcher(false, support)
@@ -248,31 +226,25 @@ class Trainer(object):
             margins.append(margin_.mean().item())
             loss = F.relu(self.margin - margin_).mean()
             
-            # --- BACKWARD PASS ---
+            if self.writer:
+                self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
+
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
 
-            # --- LOGGING FIX (Will show output every batch if log_every=1) ---
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
-                avg_margin = np.mean(margins)
-                logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}, Margin={avg_margin:.4f}")
+                logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}")
                 if self.writer:
                     self.writer.add_scalar('Avg_batch_loss', avg_loss, self.batch_nums)
-                    self.writer.add_scalar('MARGIN', avg_margin, self.batch_nums)
-                losses = deque([], self.log_every)
-                margins = deque([], self.log_every)
-
 
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
                 hits10, hits5, mrr = self.eval(meta=self.meta)
                 if self.writer:
                     self.writer.add_scalar('HITS10', hits10, self.batch_nums)
-                    self.writer.add_scalar('HITS5', hits5, self.batch_nums)
                     self.writer.add_scalar('MAP', mrr, self.batch_nums)
-
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
@@ -281,15 +253,11 @@ class Trainer(object):
             self.batch_nums += 1
             self.scheduler.step()
             
-            # --- CRITICAL FIX: Run final evaluation if max batches is reached ---
-            if self.batch_nums >= self.max_batches: 
+            # FORCE EXIT with EVAL
+            if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
-                
-                # Execute the evaluation now (assuming eval() is safe to run)
-                hits10, hits5, mrr = self.eval(meta=self.meta) 
-                
+                hits10, hits5, mrr = self.eval(meta=self.meta)
                 logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
-                
                 self.save()
                 break
 
@@ -308,26 +276,23 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-# --- OPTIMIZED & QUIET EVALUATION (SAMPLED + CLEAN LOGS) ---
+    # --- OPTIMIZED EVALUATION (BATCHED for Whole Dataset) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
+        # Standard NELL filename
         test_tasks = json.load(open(self.dataset + ('/dev_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
-        # SETTINGS FOR SPEED
-        EVAL_BATCH_SIZE = 1024
-        SAMPLE_SIZE = 1000 
+        EVAL_BATCH_SIZE = 1024 
 
-        # Outer Loop: Updates at most every 10 seconds
-        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations", mininterval=10.0):
+        for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
-            all_candidates = rel2candidates[query_]
-            
+            candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[self.escape_token(triple[0])],
                               symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
@@ -340,34 +305,29 @@ class Trainer(object):
 
             support = torch.LongTensor(support_pairs).to(self.device)
 
-            # Inner Loop: Updates at most every 30 seconds (Prevents log spam)
-            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False, mininterval=30.0):
+            for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
                 h_esc = self.escape_token(triple[0])
                 r_esc = self.escape_token(triple[1])
                 h_sym = symbol2id[h_esc]
                 h_ent = self.ent2id[h_esc] if meta else None
 
-                # --- SAMPLING STEP ---
-                current_candidates = [true] 
-                if len(all_candidates) > SAMPLE_SIZE:
-                    negs = random.sample(all_candidates, SAMPLE_SIZE)
-                    for n in negs:
-                        if n != true:
-                            current_candidates.append(n)
-                    current_candidates = current_candidates[:SAMPLE_SIZE+1]
-                else:
-                    current_candidates = all_candidates
-
-                # --- PREPARE BATCH ---
-                valid_candidate_data = []
-                for ent in current_candidates:
+                valid_candidate_data = [] 
+                for ent in candidates:
                     ent_esc = self.escape_token(ent)
+                    if (h_esc in self.e1rel_e2 and 
+                        r_esc in self.e1rel_e2[h_esc] and 
+                        ent_esc in self.e1rel_e2[h_esc][r_esc]) and ent != true:
+                        continue
                     t_sym = symbol2id[ent_esc]
                     t_ent = self.ent2id[ent_esc] if meta else None
                     valid_candidate_data.append((h_sym, t_sym, h_ent, t_ent))
 
-                # --- PROCESS ---
+                true_esc = self.escape_token(true)
+                true_sym = symbol2id[true_esc]
+                true_ent = self.ent2id[true_esc] if meta else None
+                valid_candidate_data.append((h_sym, true_sym, h_ent, true_ent))
+                
                 all_scores = []
                 for i in range(0, len(valid_candidate_data), EVAL_BATCH_SIZE):
                     batch = valid_candidate_data[i : i + EVAL_BATCH_SIZE]
@@ -383,8 +343,7 @@ class Trainer(object):
                         scores_t = self.matcher(query_batch, support)
                     all_scores.extend(scores_t.detach().cpu().numpy())
 
-                # --- RANKING ---
-                true_score = all_scores[0] # True answer is always at index 0
+                true_score = all_scores[-1]
                 all_scores_np = np.array(all_scores)
                 rank = np.sum(all_scores_np > true_score) + 1
                 
@@ -392,7 +351,6 @@ class Trainer(object):
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
-                
                 hits10_.append(1.0 if rank <= 10 else 0.0)
                 hits5_.append(1.0 if rank <= 5 else 0.0)
                 hits1_.append(1.0 if rank <= 1 else 0.0)
