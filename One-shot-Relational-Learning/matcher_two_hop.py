@@ -121,80 +121,59 @@ class EmbedMatcher(nn.Module):
 
     def forward(self, query, support, query_meta=None, support_meta=None):
         """
-        Args:
-            query: (Batch, 2) - [Head_ID, Tail_ID] for the query
-            support: (Batch, 2) - [Head_ID, Tail_ID] for the support set (one-shot)
-            query_meta: Tuple containing neighbor adjacency for query entities
-            support_meta: Tuple containing neighbor adjacency for support entities
+        Forward pass with Self-Gating and Dimension Corrections.
         """
         # Fallback for Baseline mode (if no meta provided)
         if (query_meta is None) or (support_meta is None):
-            support = self.dropout(self.symbol_emb(support)).view(-1, 2*self.embed_dim)
-            query = self.dropout(self.symbol_emb(query)).view(-1, 2*self.embed_dim)
-            support = support.unsqueeze(0)
-            support_g = self.support_encoder(support).squeeze(0)
-            query_f = self.query_encoder(support_g, query)
-            return torch.matmul(query_f, support_g.t()).squeeze()
-        
-        # Extract Self IDs from the main input pairs (Head, Tail)
-        q_h_ids = query[:, 0]
-        q_t_ids = query[:, 1]
-        s_h_ids = support[:, 0]
-        s_t_ids = support[:, 1]
+            return self.run_baseline_logic(query, support)
 
-        # Unpack Meta Data
-        # Format: (Left_Hop1, Left_Hop2, Deg_L, Right_Hop1, Right_Hop2, Deg_R)
+        # Extract Entity IDs for Self-Gating
+        q_h_ids, q_t_ids = query[:, 0], query[:, 1]
+        s_h_ids, s_t_ids = support[:, 0], support[:, 1]
+
+        # Unpack Meta (Graph Context)
         (q_l1, q_l2, q_deg_l, q_r1, q_r2, q_deg_r) = query_meta
         (s_l1, s_l2, s_deg_l, s_r1, s_r2, s_deg_r) = support_meta
         
-        # --- ENCODE QUERY ---
-        # 1. Encode 1-Hop Neighbors (Self is q_h_ids)
-        # Gating decides: Do we use the 1-hop neighbors or just the entity?
+        # --- 1. Encode Query Entity Pairs ---
+        # Hop 1
         q_h_1 = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
         q_t_1 = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
-        
-        # 2. Encode 2-Hop Neighbors (Self is STILL q_h_ids)
-        # This is critical: 2-hop neighbors are just "distant context" for the same entity.
-        # Gating decides: Is this distant context useful?
+        # Hop 2
         q_h_2 = self.neighbor_encoder(q_l2, None, q_h_ids)
         q_t_2 = self.neighbor_encoder(q_r2, None, q_t_ids)
 
-        # --- ENCODE SUPPORT ---
+        # Fuse Hops (Average)
+        q_left = (q_h_1 + q_h_2) / 2.0
+        q_right = (q_t_1 + q_t_2) / 2.0
+
+        # Concatenate to form Pair Representation
+        query_vec = torch.cat((q_left, q_right), dim=-1) # Shape: [Batch, 2*Dim]
+
+        # --- 2. Encode Support Entity Pairs ---
+        # Hop 1
         s_h_1 = self.neighbor_encoder(s_l1, s_deg_l, s_h_ids)
         s_t_1 = self.neighbor_encoder(s_r1, s_deg_r, s_t_ids)
-        
+        # Hop 2
         s_h_2 = self.neighbor_encoder(s_l2, None, s_h_ids)
         s_t_2 = self.neighbor_encoder(s_r2, None, s_t_ids)
 
-        # --- FUSE HOPS ---
-        # Now we have two representations for the Head Entity:
-        # 1. Based on 1-hop neighbors (gated)
-        # 2. Based on 2-hop neighbors (gated)
-        # We can average them or concatenate. Averaging is safer for dimension stability.
-        q_left = (q_h_1 + q_h_2) / 2.0
-        q_right = (q_t_1 + q_t_2) / 2.0
-        
+        # Fuse Hops
         s_left = (s_h_1 + s_h_2) / 2.0
         s_right = (s_t_1 + s_t_2) / 2.0
 
-        # Construct Pair Representations (Head + Tail)
-        query_vec = torch.cat((q_left, q_right), dim=-1)     # (Batch, 2*Dim)
-        support_vec = torch.cat((s_left, s_right), dim=-1)   # (Batch, 2*Dim)
+        # Concatenate
+        support_vec = torch.cat((s_left, s_right), dim=-1) # Shape: [Batch, 2*Dim]
         
-        # --- MATCHING NETWORK ---
-        # Support Encoder expects (Batch, Sequence, Dim) -> We have sequence length 1 here (one-shot)
-        support_g = self.support_encoder(support_vec.unsqueeze(1))
+        # --- 3. Matching Network (FIXED) ---
+        # Support Encoder is flexible (Linear layers), so 2D input [Batch, Dim] works fine.
+        # We DO NOT unsqueeze here, keeping it 2D.
+        support_g = self.support_encoder(support_vec) 
         
-        # Query Encoder matches query against support
-        query_g = self.query_encoder(support_g, query_vec.unsqueeze(1))
+        # Query Encoder uses LSTMCell. It STRICTLY requires 2D input [Batch, Dim].
+        # We pass query_vec (2D) and support_g (2D) directly.
+        query_g = self.query_encoder(support_g, query_vec)
         
-        # Remove extra sequence dimensions
-        support_g = support_g.squeeze(1) 
-        query_g = query_g.squeeze(1)
-
         # Calculate Similarity (Dot Product)
-        # For one-shot, we often take mean of support if k > 1, but here k=1.
-        # We just dot product the query representation with the support representation.
-        matching_scores = torch.sum(query_g * support_g, dim=1)
-        
-        return matching_scores
+        scores = torch.sum(query_g * support_g, dim=1)
+        return scores
