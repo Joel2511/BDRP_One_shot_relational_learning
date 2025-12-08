@@ -26,9 +26,14 @@ def read_options():
     parser.add_argument("--embed_model", default='ComplEx', type=str)
     parser.add_argument("--prefix", default='intial', type=str)
     parser.add_argument("--seed", default='19940419', type=int)
-
+    
+    # --- NEW HYPERPARAMETERS FOR GATING/DISTANCE ---
+    parser.add_argument("--k_neighbors", default=10, type=int, 
+                        help="Number of closest neighbors to keep (for Distance Filtering).")
+    parser.add_argument("--gate_temp", default=1.0, type=float,
+                        help="Temperature parameter for soft sigmoid gating.")
+    
     args = parser.parse_args()
-    # args.embed_path = args.dataset + '/symbol2vec.vec'
     args.save_path = 'models/' + args.prefix
 
     print("------HYPERPARAMETERS-------")
@@ -37,4 +42,3 @@ def read_options():
     print("----------------------------")
 
     return args
-
