@@ -51,66 +51,88 @@ class EmbedMatcher(nn.Module):
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-        """
-        Encodes 1-Hop neighbors using Distance Filtering (Top-K) + Gating.
-        """
-        relations = connections[:, :, 0]
-        entities = connections[:, :, 1]
         
-        rel_emb = self.dropout(self.symbol_emb(relations)) # [Batch, K_max, Dim]
-        ent_emb = self.dropout(self.symbol_emb(entities))  # [Batch, K_max, Dim]
-        self_emb = self.dropout(self.symbol_emb(entity_self_ids)).unsqueeze(1) # [Batch, 1, Dim]
-
-        batch_size, max_k, dim = ent_emb.shape
-        
-        # --- 1. Distance Calculation (Semantic Proximity) ---
-        # Normalize vectors for Cosine Similarity (Dot product is cosine if normalized)
-        norm_self = F.normalize(self_emb, p=2, dim=-1) # [Batch, 1, Dim]
-        norm_neigh = F.normalize(ent_emb, p=2, dim=-1) # [Batch, K_max, Dim]
-        
-        # Cosine Similarity: [Batch, K_max]
-        # We calculate the similarity of the center entity to all neighbors
-        similarity_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1) 
-
-        # --- 2. Top-K Filtering (Graph Structure Learning) ---
-        # Mask out padding indices (where relation ID is PAD)
-        is_pad = (relations == self.pad_idx).float() 
-        similarity_scores = similarity_scores - is_pad * 1e9 # Subtract large value from padding scores
-
-        # Get top K indices
-        # We take self.k_neighbors, or max_k if k_neighbors is larger than available neighbors
+    """
+    Encodes 1-Hop neighbors using Distance Filtering (Top-K) + Gating.
+    Improvements:
+      - normalize embeddings before applying dropout for similarity computation
+      - compute per-sample selected counts and safe division
+      - optionally use similarity weights over the selected neighbors
+    """
+        relations = connections[:, :, 0]  # [B, K_max]
+        entities = connections[:, :, 1]   # [B, K_max]
+    
+        # Embeddings (do not apply dropout before normalization used for cosine)
+        rel_emb_raw = self.symbol_emb(relations)   # [B, K_max, D]
+        ent_emb_raw = self.symbol_emb(entities)    # [B, K_max, D]
+        self_emb_raw = self.symbol_emb(entity_self_ids).unsqueeze(1)  # [B, 1, D]
+    
+        # normalize first for stable cosine similarity
+        norm_self = F.normalize(self_emb_raw, p=2, dim=-1)   # [B, 1, D]
+        norm_neigh = F.normalize(ent_emb_raw, p=2, dim=-1)   # [B, K_max, D]
+    
+        # Cosine similarity scores between self and each neighbor entity
+        similarity_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1)  # [B, K_max]
+    
+        is_pad = (relations == self.pad_idx)    # bool [B, K_max]
+        similarity_scores = similarity_scores.masked_fill(is_pad, float('-1e9'))
+    
+        batch_size, max_k, dim = ent_emb_raw.shape
         k_to_select = min(self.k_neighbors, max_k)
-        
-        # Use torch.topk to get the K highest scores (k_indices is indices, k_scores is values)
-        k_scores, k_indices = torch.topk(similarity_scores, k=k_to_select, dim=-1)
-        
-        # --- FIX: Use self.symbol_emb.weight.device to dynamically find the correct device ---
-        current_device = self.symbol_emb.weight.device
-        k_mask = torch.zeros((batch_size, max_k), device=current_device)
-        
-        k_mask.scatter_(1, k_indices, 1) # Set selected indices to 1
-        k_mask = k_mask.unsqueeze(-1).bool() # [Batch, K_max, 1]
-
-        # --- 3. GCN Projection & Aggregation ---
-        concat = torch.cat((rel_emb, ent_emb), dim=-1)      
-        projected = self.gcn_w(concat) + self.gcn_b         
+        if k_to_select <= 0:
+    
+            self_emb = self.dropout(self_emb_raw).squeeze(1)  # [B, D]
+            gate_input = self.gate_w(self_emb) + self.gate_b
+            gate_val = torch.sigmoid(gate_input / (self.gate_temp + 1e-12))
+            final_vec = gate_val * self_emb + (1.0 - gate_val) * self_emb  # effectively self_emb
+            return torch.tanh(final_vec)
+    
+        # top-k indices and scores
+        k_scores, k_indices = torch.topk(similarity_scores, k=k_to_select, dim=-1)  # [B, k]
+        # Build boolean mask of selected indices per sample
+        device = self.symbol_emb.weight.device
+        k_mask = torch.zeros((batch_size, max_k), dtype=torch.bool, device=device)
+        k_mask.scatter_(1, k_indices, True)  # True at selected positions
+    
+        rel_emb = self.dropout(rel_emb_raw)
+        ent_emb = self.dropout(ent_emb_raw)
+        self_emb = self.dropout(self_emb_raw).squeeze(1)  # [B, D]
+    
+        # GCN projection on all neighbors
+        concat = torch.cat((rel_emb, ent_emb), dim=-1)  # [B, K_max, 2D]
+        projected = self.gcn_w(concat) + self.gcn_b     # [B, K_max, D]
         projected = F.leaky_relu(projected)
-
-        # Apply the mask to projected features and calculate mean
-        # Only selected neighbors contribute to the aggregation
-        filtered_projected = projected * k_mask.float()
-        
-        # We now take the MEAN of the *filtered* neighbors (Count only non-zero items)
-        neighbor_agg = torch.sum(filtered_projected, dim=1) / (k_to_select + 1e-9) # [Batch, Dim]
-
-        # 4. Gating (Softened by Temperature)
-        gate_input = self.gate_w(neighbor_agg) + self.gate_b
-        gate_val = torch.sigmoid(gate_input / self.gate_temp) 
-        
-        # 5. Residual Connection
-        final_vec = (gate_val * neighbor_agg) + ((1.0 - gate_val) * self_emb.squeeze(1))
-
+    
+        # Zero-out non-selected neighbors
+        masked_projected = projected * k_mask.unsqueeze(-1).to(projected.dtype)  # [B, K_max, D]
+    
+    
+        # Use the k_scores but convert them into positive weights via softmax across selected indices
+        weights = torch.zeros((batch_size, max_k), device=device, dtype=projected.dtype)  # [B, K_max]
+        # set weights for selected positions to the corresponding similarity score
+        weights = weights.masked_scatter(k_mask, k_scores)  # places k_scores into selected positions
+        # zero-out pad entries (they are already very negative in similarity but ensure zero weight)
+        weights = weights.masked_fill(is_pad, 0.0)
+        # softmax across neighbors to get normalized weights; add tiny epsilon to avoid all -inf
+        weights = F.softmax(weights / (self.gate_temp + 1e-12), dim=1)  # [B, K_max]
+        weights = weights.unsqueeze(-1)  # [B, K_max, 1]
+    
+        neighbor_agg = torch.sum(masked_projected * weights, dim=1)  # [B, D]
+    
+        # If an example had zero selected neighbors (all pads), weights would be uniform zeros -> sum 0.
+        # In that case neighbor_agg is zero vector. Compute a fallback: if selected_count==0, use self_emb.
+        selected_counts = k_mask.sum(dim=1)  # [B]
+        zero_mask = (selected_counts == 0)
+        if zero_mask.any():
+            neighbor_agg[zero_mask] = self_emb[zero_mask]
+    
+        # Gating
+        gate_input = self.gate_w(neighbor_agg) + self.gate_b  # [B, 1]
+        gate_val = torch.sigmoid(gate_input / (self.gate_temp + 1e-12))  # [B, 1]
+    
+        final_vec = (gate_val * neighbor_agg) + ((1.0 - gate_val) * self_emb)
         return torch.tanh(final_vec)
+
 
     def forward(self, query, support, query_meta=None, support_meta=None):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
