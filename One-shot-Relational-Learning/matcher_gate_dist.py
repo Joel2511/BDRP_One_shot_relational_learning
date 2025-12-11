@@ -13,7 +13,7 @@ class EmbedMatcher(nn.Module):
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
-                 gate_temp=1.0, k_neighbors=10): # <--- ADDED k_neighbors parameter
+                 gate_temp=1.0, k_neighbors=10): 
         super(EmbedMatcher, self).__init__()
 
         self.embed_dim = embed_dim
@@ -22,7 +22,7 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.dropout = nn.Dropout(dropout)
         self.gate_temp = gate_temp
-        self.k_neighbors = k_neighbors # Stores the number of neighbors to keep
+        self.k_neighbors = k_neighbors 
 
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
 
@@ -73,9 +73,6 @@ class EmbedMatcher(nn.Module):
         similarity_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1) 
 
         # --- 2. Top-K Filtering (Graph Structure Learning) ---
-        # Find the indices of the top K closest neighbors (highest similarity)
-        # Note: We must exclude the padding index from the max_k comparison
-        
         # Mask out padding indices (where relation ID is PAD)
         is_pad = (relations == self.pad_idx).float() 
         similarity_scores = similarity_scores - is_pad * 1e9 # Subtract large value from padding scores
@@ -87,8 +84,10 @@ class EmbedMatcher(nn.Module):
         # Use torch.topk to get the K highest scores (k_indices is indices, k_scores is values)
         k_scores, k_indices = torch.topk(similarity_scores, k=k_to_select, dim=-1)
         
-        # Create a mask to zero-out non-selected neighbors
-        k_mask = torch.zeros((batch_size, max_k), device=self.device)
+        # --- FIX: Use self.symbol_emb.weight.device to dynamically find the correct device ---
+        current_device = self.symbol_emb.weight.device
+        k_mask = torch.zeros((batch_size, max_k), device=current_device)
+        
         k_mask.scatter_(1, k_indices, 1) # Set selected indices to 1
         k_mask = k_mask.unsqueeze(-1).bool() # [Batch, K_max, 1]
 
