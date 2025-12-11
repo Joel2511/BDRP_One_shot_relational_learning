@@ -36,7 +36,7 @@ def read_options():
     args = parser.parse_args()
     args.save_path = 'models/' + args.prefix
 
-    print("------HYPERPARAMETERS-------")
+    print("HYPERPARAMETERS")
     for k, v in vars(args).items():
         print(k + ': ' + str(v))
     print("----------------------------")
