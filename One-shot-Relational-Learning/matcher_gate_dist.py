@@ -51,14 +51,6 @@ class EmbedMatcher(nn.Module):
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-        
-    """
-    Encodes 1-Hop neighbors using Distance Filtering (Top-K) + Gating.
-    Improvements:
-      - normalize embeddings before applying dropout for similarity computation
-      - compute per-sample selected counts and safe division
-      - optionally use similarity weights over the selected neighbors
-    """
         relations = connections[:, :, 0]  # [B, K_max]
         entities = connections[:, :, 1]   # [B, K_max]
     
