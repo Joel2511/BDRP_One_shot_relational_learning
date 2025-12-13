@@ -20,6 +20,8 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.k_neighbors = k_neighbors
         self.dropout = nn.Dropout(dropout)
+        self.gate_temp = nn.Parameter(torch.tensor(1.0))  # learnable temperature
+
 
         # Embedding layer
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
