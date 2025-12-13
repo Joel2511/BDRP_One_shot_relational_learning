@@ -7,13 +7,12 @@ from modules import SupportEncoder, QueryEncoder
 
 class EmbedMatcher(nn.Module):
     """
-    1-Hop Gating + Distance Filtering.
-    Incorporates 'Joint Cosine Similarity' for ComplEx via standard cosine on concatenated tensors.
-    Uses Residual Gating and Dynamic Averaging to fix Long-Tail/Zero-Value issues.
+    1-Hop Relation-Aware Residual Gating + Distance Filtering.
+    Fixes zero-hit long-tail relations by conditioning the gate on relation context.
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
-                 dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
-                 k_neighbors=10,gate_temp=1.0): 
+                 dropout=0.2, batch_size=64, process_steps=4, finetune=False,
+                 aggregate='max', k_neighbors=10, gate_temp=1.0): 
         super(EmbedMatcher, self).__init__()
 
         self.embed_dim = embed_dim
@@ -25,17 +24,16 @@ class EmbedMatcher(nn.Module):
 
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
 
-        # --- Gating Components ---
+        # Neighbor projection
         self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
-        
-        self.gate_w = nn.Linear(embed_dim, 1) 
+
+        # Relation-aware gate
+        self.gate_w = nn.Linear(3 * embed_dim, 1)
         self.gate_b = nn.Parameter(torch.FloatTensor(1))
 
-        # Learnable Temperature (Initialized to 1.0)
-        self.gate_temp = nn.Parameter(torch.tensor(1.0))
+        self.gate_temp = nn.Parameter(torch.tensor(gate_temp))
 
-        # Initialization
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
         init.xavier_normal_(self.gate_w.weight)
@@ -53,76 +51,56 @@ class EmbedMatcher(nn.Module):
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-        """
-        Encodes 1-Hop neighbors using Distance Filtering (Top-K) + Soft Residual Gating.
-        """
         relations = connections[:, :, 0]
         entities = connections[:, :, 1]
-        
-        # 1. Get RAW Embeddings (No Dropout yet) for stable Distance Calculation
-        # This implements "Joint Cosine Similarity" for ComplEx automatically
+
         rel_emb_raw = self.symbol_emb(relations)
         ent_emb_raw = self.symbol_emb(entities)
-        self_emb_raw = self.symbol_emb(entity_self_ids).unsqueeze(1)
+        self_emb_raw = self.symbol_emb(entity_self_ids)
 
         batch_size, max_k, dim = ent_emb_raw.shape
-        
-        # --- Distance Filtering ---
-        # Normalize raw embeddings to get Cosine Similarity
-        norm_self = F.normalize(self_emb_raw, p=2, dim=-1) 
-        norm_neigh = F.normalize(ent_emb_raw, p=2, dim=-1)
-        
-        # Calculate Similarity: (B, 1, D) x (B, D, K) -> (B, 1, K) -> (B, K)
-        similarity_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1) 
 
-        # Mask padding (relation_id is PAD)
-        is_pad = (relations == self.pad_idx).float() 
-        similarity_scores = similarity_scores - (is_pad * 1e9) # Push pads to -inf
+        # Distance filtering
+        norm_self = F.normalize(self_emb_raw.unsqueeze(1), dim=-1)
+        norm_neigh = F.normalize(ent_emb_raw, dim=-1)
+        similarity_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1)
 
-        # Select Top-K
-        # If an entity has 0 neighbors, this will select pads, but we handle that next
+        is_pad = (relations == self.pad_idx).float()
+        similarity_scores = similarity_scores - (is_pad * 1e9)
+
         k_to_select = min(self.k_neighbors, max_k)
-        k_scores, k_indices = torch.topk(similarity_scores, k=k_to_select, dim=-1)
-        
-        # Create Selection Mask
-        current_device = self.symbol_emb.weight.device
-        k_mask = torch.zeros((batch_size, max_k), device=current_device)
-        k_mask.scatter_(1, k_indices, 1)
-        k_mask = k_mask.unsqueeze(-1) # Broadcastable mask
+        _, k_indices = torch.topk(similarity_scores, k=k_to_select, dim=-1)
 
-        # --- Aggregation ---
-        # NOW we apply dropout to features we want to use for training
+        device = self.symbol_emb.weight.device
+        k_mask = torch.zeros((batch_size, max_k), device=device)
+        k_mask.scatter_(1, k_indices, 1)
+        k_mask = k_mask.unsqueeze(-1)
+
+        # Neighbor aggregation
         rel_emb = self.dropout(rel_emb_raw)
         ent_emb = self.dropout(ent_emb_raw)
-        
-        concat = torch.cat((rel_emb, ent_emb), dim=-1)      
-        projected = self.gcn_w(concat) + self.gcn_b         
-        projected = F.leaky_relu(projected)
 
-        # Apply Top-K Mask
-        filtered_projected = projected * k_mask
-        
-        # Valid Mask: Ensure we don't count pads even if they were in Top-K (edge case)
+        concat = torch.cat((rel_emb, ent_emb), dim=-1)
+        projected = F.leaky_relu(self.gcn_w(concat) + self.gcn_b)
+
         valid_mask = (1.0 - is_pad.unsqueeze(-1)) * k_mask
-        
-        # CRITICAL FIX: Dynamic Denominator
-        # Divide by the ACTUAL number of valid neighbors selected, not K.
-        # Clamp to 1.0 to avoid division by zero for isolated nodes.
-        denom = valid_mask.sum(dim=1)
-        denom = torch.clamp(denom, min=1.0)
-        
-        neighbor_agg = torch.sum(filtered_projected * valid_mask, dim=1) / denom
+        denom = torch.clamp(valid_mask.sum(dim=1), min=1.0)
 
-        # --- Soft Gating (Residual) ---
-        # Learnable temperature
-        gate_input = self.gate_w(neighbor_agg) + self.gate_b
-        actual_temp = torch.clamp(self.gate_temp, min=0.01, max=10.0) # Prevent extremes
-        gate_val = torch.sigmoid(gate_input / actual_temp) 
-        
-        # RESIDUAL CONNECTION: Self + (Gate * Neighbor)
-        # This ensures the Self embedding is never suppressed.
-        self_emb_final = self.dropout(self.symbol_emb(entity_self_ids)) # Apply dropout to self here
-        final_vec = self_emb_final + (gate_val * neighbor_agg)
+        neighbor_agg = torch.sum(projected * valid_mask, dim=1) / denom
+
+        # Relation aggregation (mean of selected relations)
+        rel_agg = torch.sum(rel_emb * valid_mask, dim=1) / denom
+
+        # Relation-aware residual gate
+        gate_input = torch.cat(
+            [neighbor_agg, self_emb_raw, rel_agg], dim=-1
+        )
+
+        temp = torch.clamp(self.gate_temp, 0.01, 10.0)
+        gate_val = torch.sigmoid((self.gate_w(gate_input) + self.gate_b) / temp)
+
+        self_emb_final = self.dropout(self_emb_raw)
+        final_vec = self_emb_final + gate_val * neighbor_agg
 
         return torch.tanh(final_vec)
 
@@ -144,9 +122,8 @@ class EmbedMatcher(nn.Module):
         support_g = self.support_encoder(support_vec.unsqueeze(1)) 
         query_encoded = self.support_encoder(query_vec.unsqueeze(1))
         
-        support_g = torch.mean(support_g, dim=0, keepdim=True)
-        support_g = support_g.squeeze(1) 
-        query_encoded = query_encoded.squeeze(1) 
+        support_g = torch.mean(support_g, dim=0).squeeze(0)
+        query_encoded = query_encoded.squeeze(1)
         
         query_g = self.query_encoder(support_g, query_encoded)
         
