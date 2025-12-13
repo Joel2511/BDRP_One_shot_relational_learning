@@ -31,12 +31,13 @@ class EmbedMatcher(nn.Module):
         # Embedding layer
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
 
-        # Neighbor projection
+        # Neighbor projection (GCN-style)
         self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
 
         # --- FIX 1: Content-Based Gate ---
-        # Removed nn.Embedding. Replaced with MLP that sees the DATA, not the ID.
+        # Instead of nn.Embedding (which fails for new relations), we use an MLP 
+        # to judge the quality of the neighbor aggregation itself.
         self.context_gate = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
             nn.LayerNorm(embed_dim // 2),
@@ -118,10 +119,25 @@ class EmbedMatcher(nn.Module):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
         s_h_ids, s_t_ids = support[:, 0], support[:, 1]
 
-        # --- FIX 2: Correct Unpacking for your Trainer ---
-        # Your trainer.py returns a tuple of 4 items, not 6.
-        q_l1, q_deg_l, q_r1, q_deg_r = query_meta
-        s_l1, s_deg_l, s_r1, s_deg_r = support_meta
+        # --- FIX: Flexible Unpacking ---
+        # The trainer might send 4 items (1-hop) or 6 items (2-hop with placeholders).
+        # We explicitly grab what we need based on tuple size.
+        if len(query_meta) == 6:
+            # 2-hop format: (l1, l2, deg_l, r1, r2, deg_r)
+            # We ignore index 1 and 4 (the 2-hop connections)
+            q_l1 = query_meta[0]
+            q_deg_l = query_meta[2]
+            q_r1 = query_meta[3]
+            q_deg_r = query_meta[5]
+            
+            s_l1 = support_meta[0]
+            s_deg_l = support_meta[2]
+            s_r1 = support_meta[3]
+            s_deg_r = support_meta[5]
+        else:
+            # 1-hop format: (l1, deg_l, r1, deg_r)
+            q_l1, q_deg_l, q_r1, q_deg_r = query_meta
+            s_l1, s_deg_l, s_r1, s_deg_r = support_meta
         
         q_left = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
         q_right = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
