@@ -8,7 +8,7 @@ from modules import SupportEncoder, QueryEncoder
 class EmbedMatcher(nn.Module):
     """
     Relation-Aware Gating + Distance Filtering
-    Ensures baseline neighbor aggregation behavior with gating for relations that benefit.
+    Combines baseline neighbor aggregation with gating applied only to relevant neighbors.
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max',
@@ -20,8 +20,7 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.k_neighbors = k_neighbors
         self.dropout = nn.Dropout(dropout)
-        self.gate_temp = nn.Parameter(torch.tensor(1.0))  # learnable temperature
-
+        self.gate_temp = nn.Parameter(torch.tensor(1.0))  # learnable gating temperature
 
         # Embedding layer
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
@@ -53,36 +52,54 @@ class EmbedMatcher(nn.Module):
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
         """
-        Neighbor encoding with relation-aware gating and optional distance filtering.
+        Neighbor encoding with distance filtering + relation-aware gating.
         """
         relations = connections[:, :, 0]
         entities = connections[:, :, 1]
         batch_size, max_k = entities.shape
 
         # Embeddings
-        rel_embeds = self.dropout(self.symbol_emb(relations))
-        ent_embeds = self.dropout(self.symbol_emb(entities))
+        rel_embeds = self.symbol_emb(relations)
+        ent_embeds = self.symbol_emb(entities)
         self_embeds = self.symbol_emb(entity_self_ids).unsqueeze(1)
 
-        # Concatenate relation + entity embeddings
+        # --- Distance-based neighbor selection ---
+        # Compute cosine similarity between self and neighbors
+        norm_self = F.normalize(self_embeds, p=2, dim=-1)
+        norm_neigh = F.normalize(ent_embeds, p=2, dim=-1)
+        sim_scores = torch.bmm(norm_self, norm_neigh.transpose(1, 2)).squeeze(1)
+
+        # Mask padding neighbors
+        pad_mask = (relations == self.pad_idx).float()
+        sim_scores = sim_scores - pad_mask * 1e9
+
+        # Top-K neighbors
+        k = min(self.k_neighbors, max_k)
+        topk_scores, topk_indices = torch.topk(sim_scores, k, dim=1)
+
+        # Mask for selected neighbors
+        k_mask = torch.zeros_like(sim_scores)
+        k_mask.scatter_(1, topk_indices, 1.0)
+        k_mask = k_mask.unsqueeze(-1)  # for broadcasting
+
+        # --- Project embeddings ---
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
         projected = F.leaky_relu(self.gcn_w(concat_embeds) + self.gcn_b)
-
-        # Mask padding
-        is_pad = (relations == self.pad_idx).float().unsqueeze(-1)
-        projected = projected * (1.0 - is_pad)
+        projected = projected * k_mask  # only keep top-K neighbors
 
         # Dynamic denominator for averaging
-        valid_counts = num_neighbors.unsqueeze(1).clamp(min=1.0)
+        valid_counts = k_mask.sum(dim=1).clamp(min=1.0)
         neighbor_agg = projected.sum(dim=1) / valid_counts
 
-        # Relation-aware gating
-        # Use mean gate over neighbors; if no neighbors, gate=1
+        # --- Relation-aware gating ---
         neighbor_rel_ids = relations.clone()
-        neighbor_rel_ids[relations == self.pad_idx] = 0  # avoid pad
+        neighbor_rel_ids[relations == self.pad_idx] = 0
         gate_vals = self.gate_w(neighbor_rel_ids).squeeze(-1)  # (batch, max_k)
+        gate_vals = gate_vals * k_mask.squeeze(-1)  # only top-K neighbors contribute
         gate_vals = torch.sigmoid(gate_vals.mean(dim=1, keepdim=True) / self.gate_temp)
-        gate_vals = torch.where(num_neighbors.unsqueeze(-1) > 0, gate_vals, torch.ones_like(gate_vals))
+
+        # If no neighbors, gate=1
+        gate_vals = torch.where(valid_counts > 0, gate_vals, torch.ones_like(gate_vals))
 
         # Residual connection
         final_vec = self_embeds.squeeze(1) + gate_vals * neighbor_agg
@@ -95,6 +112,7 @@ class EmbedMatcher(nn.Module):
         (q_l1, _, q_deg_l, q_r1, _, q_deg_r) = query_meta
         (s_l1, _, s_deg_l, s_r1, _, s_deg_r) = support_meta
 
+        # Encode neighbors with distance filtering + gating
         q_left = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
         q_right = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
         query_vec = torch.cat((q_left, q_right), dim=-1)
@@ -103,6 +121,7 @@ class EmbedMatcher(nn.Module):
         s_right = self.neighbor_encoder(s_r1, s_deg_r, s_t_ids)
         support_vec = torch.cat((s_left, s_right), dim=-1)
 
+        # Encode support & query vectors
         support_g = self.support_encoder(support_vec.unsqueeze(1))
         query_encoded = self.support_encoder(query_vec.unsqueeze(1))
 
@@ -110,7 +129,9 @@ class EmbedMatcher(nn.Module):
         support_g = support_g.squeeze(1)
         query_encoded = query_encoded.squeeze(1)
 
+        # Query attention over support
         query_g = self.query_encoder(support_g, query_encoded)
 
+        # Cosine similarity scores
         scores = torch.sum(query_g * support_g, dim=1)
         return scores
