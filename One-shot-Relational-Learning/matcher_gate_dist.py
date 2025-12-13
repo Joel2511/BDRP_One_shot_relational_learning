@@ -83,10 +83,23 @@ class EmbedMatcher(nn.Module):
             s_mean = s_emb.mean(dim=0, keepdim=True)
             return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
 
-        # Original 4-tuple unpacking
-        query_left_connections, query_left_degrees, query_right_connections, query_right_degrees = query_meta
-        support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta
+        # FIXED 6-TUPLE UNPACK
+        q_l1, q_l2, q_deg_l, q_r1, q_r2, q_deg_r = query_meta
+        s_l1, s_l2, s_deg_l, s_r1, s_r2, s_deg_r = support_meta
 
+
+            # Use 1-hop only
+        query_left_connections = q_l1
+        query_left_degrees = q_deg_l  
+        query_right_connections = q_r1
+        query_right_degrees = q_deg_r
+        
+        support_left_connections = s_l1
+        support_left_degrees = s_deg_l
+        support_right_connections = s_r1
+        support_right_degrees = s_deg_r
+
+        
         # Neighbor encoding
         query_left = self.neighbor_encoder(query_left_connections, query_left_degrees)
         query_right = self.neighbor_encoder(query_right_connections, query_right_degrees)
