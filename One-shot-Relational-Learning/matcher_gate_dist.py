@@ -3,12 +3,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from modules import SupportEncoder, QueryEncoder
+from modules import SupportEncoder, QueryEncoder 
 
 class EmbedMatcher(nn.Module):
     """
-    Relation-Aware Gating + Query-Attention Neighbor Aggregation
-    Ensures baseline neighbor aggregation behavior with query-adaptive attention weights.
+    Relation-Aware Gating + Attention Neighbor Encoding
+    Uses attention weights instead of distance for one-shot matching.
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max',
@@ -20,6 +20,7 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.k_neighbors = k_neighbors
         self.dropout = nn.Dropout(dropout)
+        self.gate_temp = nn.Parameter(torch.tensor(1.0))  # learnable temperature
 
         # Embedding layer
         self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
@@ -28,7 +29,7 @@ class EmbedMatcher(nn.Module):
         self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
 
-        # Relation-aware gating (optional bias on attention scores)
+        # Relation-aware gating (one gate per relation)
         self.gate_w = nn.Embedding(num_symbols, 1)
         self.gate_b = nn.Parameter(torch.FloatTensor(1))
 
@@ -36,9 +37,9 @@ class EmbedMatcher(nn.Module):
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
         init.constant_(self.gate_b, 0)
-        init.normal_(self.gate_w.weight, mean=0.0, std=0.05)  # small bias around 0
+        init.normal_(self.gate_w.weight, mean=1.0, std=0.05)  # start near 1.0
 
-        if use_pretrain:
+        if use_pretrain and embed is not None:
             logging.info('LOADING KB EMBEDDINGS')
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
@@ -51,41 +52,43 @@ class EmbedMatcher(nn.Module):
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
         """
-        Neighbor encoding with query-dependent attention and optional relation bias.
+        Neighbor encoding with attention + relation-aware gating.
         """
-        relations = connections[:, :, 0]           # (batch, max_k)
-        entities = connections[:, :, 1]            # (batch, max_k)
+        relations = connections[:, :, 0]
+        entities = connections[:, :, 1]
         batch_size, max_k = entities.shape
 
         # Embeddings
         rel_embeds = self.dropout(self.symbol_emb(relations))
         ent_embeds = self.dropout(self.symbol_emb(entities))
-        self_embeds = self.symbol_emb(entity_self_ids).unsqueeze(1)  # (batch,1,embed_dim)
+        self_embeds = self.symbol_emb(entity_self_ids).unsqueeze(1)
 
         # Concatenate relation + entity embeddings
-        neighbor_vecs = torch.cat((rel_embeds, ent_embeds), dim=-1)  # (batch,max_k,2*embed_dim)
-        projected = F.leaky_relu(self.gcn_w(neighbor_vecs) + self.gcn_b)  # (batch,max_k,embed_dim)
+        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
+        projected = F.leaky_relu(self.gcn_w(concat_embeds) + self.gcn_b)
 
-        # Mask padding
+        # Mask padding for aggregation
         is_pad = (relations == self.pad_idx).float().unsqueeze(-1)
         projected = projected * (1.0 - is_pad)
 
-        # Query-dependent attention
-        query_vec = self_embeds  # (batch,1,embed_dim)
-        attn_scores = torch.bmm(projected, query_vec.transpose(1,2)).squeeze(-1)  # (batch,max_k)
-        # Add relation bias
-        gate_vals = self.gate_w(relations).squeeze(-1) + self.gate_b  # (batch,max_k)
+        # Dynamic denominator for averaging
+        valid_counts = num_neighbors.unsqueeze(1).clamp(min=1.0)
+        neighbor_agg = projected.sum(dim=1) / valid_counts
+
+        # Relation-aware gating
+        neighbor_rel_ids = relations.clone()
+        neighbor_rel_ids[neighbor_rel_ids >= self.num_symbols] = 0  # safe index
+        gate_vals = self.gate_w(neighbor_rel_ids).squeeze(-1) + self.gate_b
+        gate_vals = torch.sigmoid(gate_vals.mean(dim=1, keepdim=True) / self.gate_temp)
+        gate_vals = torch.where(num_neighbors.unsqueeze(-1) > 0, gate_vals, torch.ones_like(gate_vals))
+
+        # Attention over neighbors
+        attn_scores = torch.sum(projected * projected, dim=-1)  # simple self-similarity
         attn_scores = attn_scores + gate_vals
-
-        # Mask padding in attention
         attn_scores = attn_scores.masked_fill(relations == self.pad_idx, float('-inf'))
-        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)  # (batch,max_k,1)
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)
 
-        # Weighted sum
-        neighbor_agg = (projected * attn_weights).sum(dim=1)  # (batch,embed_dim)
-
-        # Residual + tanh
-        final_vec = self_embeds.squeeze(1) + neighbor_agg
+        final_vec = self_embeds.squeeze(1) + (attn_weights * projected).sum(dim=1)
         return torch.tanh(final_vec)
 
     def forward(self, query, support, query_meta=None, support_meta=None):
@@ -95,7 +98,6 @@ class EmbedMatcher(nn.Module):
         (q_l1, _, q_deg_l, q_r1, _, q_deg_r) = query_meta
         (s_l1, _, s_deg_l, s_r1, _, s_deg_r) = support_meta
 
-        # Neighbor aggregation with attention
         q_left = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
         q_right = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
         query_vec = torch.cat((q_left, q_right), dim=-1)
@@ -104,16 +106,14 @@ class EmbedMatcher(nn.Module):
         s_right = self.neighbor_encoder(s_r1, s_deg_r, s_t_ids)
         support_vec = torch.cat((s_left, s_right), dim=-1)
 
-        # Encode via SupportEncoder
         support_g = self.support_encoder(support_vec.unsqueeze(1))
         query_encoded = self.support_encoder(query_vec.unsqueeze(1))
 
-        support_g = torch.mean(support_g, dim=0, keepdim=True).squeeze(1)
+        support_g = torch.mean(support_g, dim=0, keepdim=True)
+        support_g = support_g.squeeze(1)
         query_encoded = query_encoded.squeeze(1)
 
-        # Query encoder
         query_g = self.query_encoder(support_g, query_encoded)
 
-        # Cosine similarity (or dot product)
         scores = torch.sum(query_g * support_g, dim=1)
         return scores
