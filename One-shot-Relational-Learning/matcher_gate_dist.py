@@ -66,60 +66,40 @@ class EmbedMatcher(nn.Module):
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-        """
-        Encodes neighbors using Similarity Attention and Input-Dependent Gating.
-        """
         relations = connections[:, :, 0]
         entities = connections[:, :, 1]
         
-        # 1. Embeddings
+        # 1. Embeddings  
         rel_emb = self.symbol_emb(relations)
-        ent_emb = self.symbol_emb(entities)
-        self_emb = self.symbol_emb(entity_self_ids).unsqueeze(1) # [B, 1, D]
-
-        # 2. Project Neighbors (GCN Step)
-        # Concatenate Relation + Entity -> Project
+        ent_emb = self.symbol_emb(entities) 
+        self_emb = self.symbol_emb(entity_self_ids).unsqueeze(1)
+    
+        # 2. Project Neighbors (SIMPLE MAX-POOL BASELINE)
         concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
-        projected = self.gcn_w(concat_emb) + self.gcn_b
-        projected = F.leaky_relu(projected) # [B, K, D]
-        
-        # Apply dropout here
+        projected = self.gcn_w(concat_emb) + self.gcn_b  
+        projected = F.leaky_relu(projected)
         projected = self.dropout(projected)
-
-        # 3. Similarity Attention 
-        # "How semantically related is this neighbor context to the center entity?"
-        # Dot product with self-embedding
-        attn_scores = (projected * self_emb).sum(dim=-1) # [B, K]
         
-        # Mask padding
-        is_pad = (relations == self.pad_idx)
-        attn_scores = attn_scores.masked_fill(is_pad, -1e9)
+        # FIXED: Simple max-pool (PROVEN on NELL-One) 
+        # No attention - sparsity kills it
+        neighbor_agg = projected.max(dim=1)[0]  # [B, D]
+    
+        # 3. FIXED Content Gate (Self-Residual)
+        residual = self_emb.squeeze(1)  # [B, D]
+        gate_input = neighbor_agg - residual  # Difference signal
+        gate_logit = self.context_gate(gate_input)  # [B, 1]
         
-        # Softmax to get weights
-        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1) # [B, K, 1]
+        gate_val = torch.sigmoid(gate_logit / self.gate_temp)
+        gate_val = torch.clamp(gate_val, 0.1, 0.9)  # Stability
         
-        # Aggregate
-        neighbor_agg = (attn_weights * projected).sum(dim=1) # [B, D]
-
-        # 4. Input-Dependent Soft Gating (The Fix)
-        # The gate looks at the *content* of the aggregation. 
-        # If it matches a known "good signal" pattern, it opens.
-        gate_logit = self.context_gate(neighbor_agg) # [B, 1]
-        
-        # Clamp temp to prevent numerical explosion
-        curr_temp = torch.clamp(self.gate_temp, min=0.1, max=5.0)
-        gate_val = torch.sigmoid(gate_logit / curr_temp)
-        
-        # If a node has literally 0 neighbors, force gate to 0 (trust Self only)
-        has_neighbors = (num_neighbors > 0).float().unsqueeze(1)
-        gate_val = gate_val * has_neighbors
-
-        # 5. Residual Connection
-        # Output = Self + (Gate * Neighbors)
-        # This guarantees the "Self" signal is preserved.
-        final_vec = self_emb.squeeze(1) + (gate_val * neighbor_agg)
-
+        # Zero-neighbor handling
+        has_neighbors = (num_neighbors > 0).float().unsqueeze(1)  
+        gate_val *= has_neighbors
+    
+        # 4. Clean Residual: Self + Gated Neighbors
+        final_vec = residual + gate_val * neighbor_agg
         return torch.tanh(final_vec)
+
 
     def forward(self, query, support, query_meta=None, support_meta=None):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
