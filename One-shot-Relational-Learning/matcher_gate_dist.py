@@ -15,7 +15,7 @@ class EmbedMatcher(nn.Module):
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
-                 k_neighbors=15): # Default K=15 based on your script
+                 k_neighbors=10):
         super(EmbedMatcher, self).__init__()
         self.embed_dim = embed_dim
         self.pad_idx = num_symbols
@@ -24,8 +24,8 @@ class EmbedMatcher(nn.Module):
         self.k_neighbors = k_neighbors
         self.dropout = nn.Dropout(dropout)
         
-        # Learnable Temperature
-        # Starts at 1.0. Optimizer will adjust it.
+        # Learnable Temperature (Initialized to 1.0)
+        # Allows the model to find the optimal "softness" for the decision boundary
         self.gate_temp = nn.Parameter(torch.tensor(1.0)) 
 
         # Embedding layer
@@ -35,12 +35,11 @@ class EmbedMatcher(nn.Module):
         self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
 
-        # --- FIX 1: Content-Based Gate ---
+        # --- FIX: Content-Based Gate (Generalizes to Unseen Relations) ---
         # Instead of nn.Embedding (which fails for new relations), we use an MLP 
         # to judge the quality of the neighbor aggregation itself.
         self.context_gate = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
-            nn.LayerNorm(embed_dim // 2),
             nn.ReLU(),
             nn.Linear(embed_dim // 2, 1)
         )
@@ -49,6 +48,7 @@ class EmbedMatcher(nn.Module):
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
         
+        # Initialize gate MLP
         for m in self.context_gate.modules():
             if isinstance(m, nn.Linear):
                 init.xavier_normal_(m.weight)
@@ -66,51 +66,57 @@ class EmbedMatcher(nn.Module):
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
+        """
+        Encodes neighbors using Similarity Attention and Input-Dependent Gating.
+        """
         relations = connections[:, :, 0]
         entities = connections[:, :, 1]
         
-        # 1. Embeddings (Raw for similarity calculation)
-        rel_emb_raw = self.symbol_emb(relations)
-        ent_emb_raw = self.symbol_emb(entities)
+        # 1. Embeddings
+        rel_emb = self.symbol_emb(relations)
+        ent_emb = self.symbol_emb(entities)
         self_emb = self.symbol_emb(entity_self_ids).unsqueeze(1) # [B, 1, D]
 
         # 2. Project Neighbors (GCN Step)
-        concat_emb = torch.cat((rel_emb_raw, ent_emb_raw), dim=-1)
+        # Concatenate Relation + Entity -> Project
+        concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
         projected = self.gcn_w(concat_emb) + self.gcn_b
-        projected = F.leaky_relu(projected) 
+        projected = F.leaky_relu(projected) # [B, K, D]
         
-        # Apply dropout to features used for aggregation
+        # Apply dropout here
         projected = self.dropout(projected)
 
         # 3. Similarity Attention 
-        # Calculate relevance of each neighbor to the center
-        # (B, K, D) * (B, 1, D) -> sum -> (B, K)
-        attn_scores = (projected * self_emb).sum(dim=-1) 
+        # "How semantically related is this neighbor context to the center entity?"
+        # Dot product with self-embedding
+        attn_scores = (projected * self_emb).sum(dim=-1) # [B, K]
         
         # Mask padding
         is_pad = (relations == self.pad_idx)
         attn_scores = attn_scores.masked_fill(is_pad, -1e9)
         
-        # Weights
+        # Softmax to get weights
         attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1) # [B, K, 1]
         
-        # Weighted Sum
+        # Aggregate
         neighbor_agg = (attn_weights * projected).sum(dim=1) # [B, D]
 
         # 4. Input-Dependent Soft Gating (The Fix)
-        # Determine trust based on the aggregated signal itself
+        # The gate looks at the *content* of the aggregation. 
+        # If it matches a known "good signal" pattern, it opens.
         gate_logit = self.context_gate(neighbor_agg) # [B, 1]
         
-        # Clamp temp to avoid instability
+        # Clamp temp to prevent numerical explosion
         curr_temp = torch.clamp(self.gate_temp, min=0.1, max=5.0)
         gate_val = torch.sigmoid(gate_logit / curr_temp)
         
-        # Zero-out gate if node has absolutely no neighbors
+        # If a node has literally 0 neighbors, force gate to 0 (trust Self only)
         has_neighbors = (num_neighbors > 0).float().unsqueeze(1)
         gate_val = gate_val * has_neighbors
 
         # 5. Residual Connection
-        # Self + (Gate * Neighbors). Ensures rare entities retain their identity.
+        # Output = Self + (Gate * Neighbors)
+        # This guarantees the "Self" signal is preserved.
         final_vec = self_emb.squeeze(1) + (gate_val * neighbor_agg)
 
         return torch.tanh(final_vec)
@@ -119,37 +125,24 @@ class EmbedMatcher(nn.Module):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
         s_h_ids, s_t_ids = support[:, 0], support[:, 1]
 
-        # --- FIX: Flexible Unpacking ---
-        # The trainer might send 4 items (1-hop) or 6 items (2-hop with placeholders).
-        # We explicitly grab what we need based on tuple size.
-        if len(query_meta) == 6:
-            # 2-hop format: (l1, l2, deg_l, r1, r2, deg_r)
-            # We ignore index 1 and 4 (the 2-hop connections)
-            q_l1 = query_meta[0]
-            q_deg_l = query_meta[2]
-            q_r1 = query_meta[3]
-            q_deg_r = query_meta[5]
-            
-            s_l1 = support_meta[0]
-            s_deg_l = support_meta[2]
-            s_r1 = support_meta[3]
-            s_deg_r = support_meta[5]
-        else:
-            # 1-hop format: (l1, deg_l, r1, deg_r)
-            q_l1, q_deg_l, q_r1, q_deg_r = query_meta
-            s_l1, s_deg_l, s_r1, s_deg_r = support_meta
+        (q_l1, _, q_deg_l, q_r1, _, q_deg_r) = query_meta
+        (s_l1, _, s_deg_l, s_r1, _, s_deg_r) = support_meta
         
+        # Encode Query Head and Tail
         q_left = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
         q_right = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
         query_vec = torch.cat((q_left, q_right), dim=-1)
 
+        # Encode Support Head and Tail
         s_left = self.neighbor_encoder(s_l1, s_deg_l, s_h_ids)
         s_right = self.neighbor_encoder(s_r1, s_deg_r, s_t_ids)
         support_vec = torch.cat((s_left, s_right), dim=-1)
         
+        # Matching Network processing
         support_g = self.support_encoder(support_vec.unsqueeze(1)) 
         query_encoded = self.support_encoder(query_vec.unsqueeze(1))
         
+        # Pooling and Refinement
         support_g = torch.mean(support_g, dim=0, keepdim=True)
         support_g = support_g.squeeze(1) 
         query_encoded = query_encoded.squeeze(1) 
