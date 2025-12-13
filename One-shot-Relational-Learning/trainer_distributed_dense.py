@@ -343,7 +343,10 @@ class Trainer(object):
                         scores_t = self.matcher(query_batch, support, query_meta, support_meta)
                     else:
                         scores_t = self.matcher(query_batch, support)
-                    all_scores.extend(scores_t.detach().cpu().numpy())
+                        if scores_t.dim() == 0:
+                            all_scores.append(scores_t.item())
+                        else:
+                            all_scores.extend(scores_t.detach().cpu().numpy())
 
                 true_score = all_scores[-1]
                 all_scores_np = np.array(all_scores)
