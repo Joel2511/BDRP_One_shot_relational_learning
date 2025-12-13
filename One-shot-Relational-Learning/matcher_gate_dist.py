@@ -122,7 +122,7 @@ class EmbedMatcher(nn.Module):
         support_g = self.support_encoder(support_vec.unsqueeze(1)) 
         query_encoded = self.support_encoder(query_vec.unsqueeze(1))
         
-        support_g = torch.mean(support_g, dim=0).squeeze(0)
+        support_g = torch.mean(support_g, dim=0, keepdim=True)  # keeps shape [1, feature_dim]
         query_encoded = query_encoded.squeeze(1)
         
         query_g = self.query_encoder(support_g, query_encoded)
