@@ -33,7 +33,6 @@ class EmbedMatcher(nn.Module):
         # Relation-aware gating (one gate per relation)
         self.gate_w = nn.Embedding(num_symbols, 1)
         self.gate_b = nn.Parameter(torch.FloatTensor(1))
-        self.gate_temp = nn.Parameter(torch.tensor(gate_temp_init))
 
         # Initialization
         init.xavier_normal_(self.gcn_w.weight)
