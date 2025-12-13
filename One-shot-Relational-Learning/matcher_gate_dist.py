@@ -7,11 +7,12 @@ from modules import SupportEncoder, QueryEncoder
 
 class EmbedMatcher(nn.Module):
     """
-    Input-Dependent Soft Gating + Similarity Attention.
+    Robust One-Shot Matcher.
     
-    1. Attention: Weights neighbors based on similarity to the center node (Semantic Relevance).
-    2. Gating: A generic MLP that decides trust based on the signal quality, NOT the relation ID.
-       This solves the 'One-Shot' generalization issue.
+    Features:
+    1. Similarity Attention: Weights neighbors by how relevant they are to the center entity.
+    2. Content-Based Gating: An MLP decides to trust neighbors based on signal quality, NOT relation ID.
+       This ensures the model generalizes to UNSEEN relations in the test set.
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
@@ -25,7 +26,6 @@ class EmbedMatcher(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
         # Learnable Temperature (Initialized to 1.0)
-        # Allows the model to find the optimal "softness" for the decision boundary
         self.gate_temp = nn.Parameter(torch.tensor(1.0)) 
 
         # Embedding layer
@@ -35,8 +35,9 @@ class EmbedMatcher(nn.Module):
         self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
 
-        # --- NEW: Content-Based Gate (Generalizes to Unseen Relations) ---
-        # Instead of an Embedding (which memorizes), we use an MLP to judge signal quality.
+        # --- FIX: Content-Based Gate (Generalizes to Unseen Relations) ---
+        # Instead of nn.Embedding (which fails for new relations), we use an MLP 
+        # to judge the quality of the neighbor aggregation itself.
         self.context_gate = nn.Sequential(
             nn.Linear(embed_dim, embed_dim // 2),
             nn.ReLU(),
@@ -46,7 +47,8 @@ class EmbedMatcher(nn.Module):
         # Initialization
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
-        # Initialize gate to be slightly open but neutral
+        
+        # Initialize gate MLP
         for m in self.context_gate.modules():
             if isinstance(m, nn.Linear):
                 init.xavier_normal_(m.weight)
@@ -71,23 +73,22 @@ class EmbedMatcher(nn.Module):
         entities = connections[:, :, 1]
         
         # 1. Embeddings
-        # We apply dropout *after* retrieval for robustness
         rel_emb = self.symbol_emb(relations)
         ent_emb = self.symbol_emb(entities)
         self_emb = self.symbol_emb(entity_self_ids).unsqueeze(1) # [B, 1, D]
 
         # 2. Project Neighbors (GCN Step)
-        # Concatenate Relation + Entity -> Project to Entity Dimension
+        # Concatenate Relation + Entity -> Project
         concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
         projected = self.gcn_w(concat_emb) + self.gcn_b
         projected = F.leaky_relu(projected) # [B, K, D]
         
-        # Apply dropout to the features we are about to use
+        # Apply dropout here
         projected = self.dropout(projected)
 
-        # 3. Similarity Attention (Replacing Distance Filtering with Soft Attention)
-        # "How similar is this projected neighbor context to the center entity?"
-        # Standard Dot-Product Attention
+        # 3. Similarity Attention 
+        # "How semantically related is this neighbor context to the center entity?"
+        # Dot product with self-embedding
         attn_scores = (projected * self_emb).sum(dim=-1) # [B, K]
         
         # Mask padding
@@ -100,23 +101,22 @@ class EmbedMatcher(nn.Module):
         # Aggregate
         neighbor_agg = (attn_weights * projected).sum(dim=1) # [B, D]
 
-        # 4. Input-Dependent Soft Gating
+        # 4. Input-Dependent Soft Gating (The Fix)
         # The gate looks at the *content* of the aggregation. 
-        # If it's coherent/strong, it opens. If it's random noise, it closes.
+        # If it matches a known "good signal" pattern, it opens.
         gate_logit = self.context_gate(neighbor_agg) # [B, 1]
         
         # Clamp temp to prevent numerical explosion
         curr_temp = torch.clamp(self.gate_temp, min=0.1, max=5.0)
         gate_val = torch.sigmoid(gate_logit / curr_temp)
         
-        # Handle case where node has NO neighbors (num_neighbors == 0)
-        # If no neighbors, force gate to 0 (trust Self only)
+        # If a node has literally 0 neighbors, force gate to 0 (trust Self only)
         has_neighbors = (num_neighbors > 0).float().unsqueeze(1)
         gate_val = gate_val * has_neighbors
 
         # 5. Residual Connection
         # Output = Self + (Gate * Neighbors)
-        # This guarantees the "Self" signal is always preserved (crucial for rare tails)
+        # This guarantees the "Self" signal is preserved.
         final_vec = self_emb.squeeze(1) + (gate_val * neighbor_agg)
 
         return torch.tanh(final_vec)
