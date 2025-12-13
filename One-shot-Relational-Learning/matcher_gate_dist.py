@@ -65,40 +65,27 @@ class EmbedMatcher(nn.Module):
         self.support_encoder = SupportEncoder(d_model, 2 * d_model, dropout)
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
-    def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-        relations = connections[:, :, 0]
-        entities = connections[:, :, 1]
-        
-        # 1. Embeddings  
-        rel_emb = self.symbol_emb(relations)
-        ent_emb = self.symbol_emb(entities) 
-        self_emb = self.symbol_emb(entity_self_ids).unsqueeze(1)
+def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
+    relations = connections[:, :, 0]
+    entities = connections[:, :, 1]
     
-        # 2. Project Neighbors (SIMPLE MAX-POOL BASELINE)
-        concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
-        projected = self.gcn_w(concat_emb) + self.gcn_b  
-        projected = F.leaky_relu(projected)
-        projected = self.dropout(projected)
-        
-        # FIXED: Simple max-pool (PROVEN on NELL-One) 
-        # No attention - sparsity kills it
-        neighbor_agg = projected.max(dim=1)[0]  # [B, D]
+    # EMBED
+    rel_emb = self.symbol_emb(relations)
+    ent_emb = self.symbol_emb(entities)
     
-        # 3. FIXED Content Gate (Self-Residual)
-        residual = self_emb.squeeze(1)  # [B, D]
-        gate_input = neighbor_agg - residual  # Difference signal
-        gate_logit = self.context_gate(gate_input)  # [B, 1]
-        
-        gate_val = torch.sigmoid(gate_logit / self.gate_temp)
-        gate_val = torch.clamp(gate_val, 0.1, 0.9)  # Stability
-        
-        # Zero-neighbor handling
-        has_neighbors = (num_neighbors > 0).float().unsqueeze(1)  
-        gate_val *= has_neighbors
+    # MAX-POOL (PROVEN SOTA ON NELL-ONE)
+    concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
+    projected = self.gcn_w(concat_emb) + self.gcn_b
+    projected = F.leaky_relu(projected, 0.1)  # Lower slope
+    projected = self.dropout(projected)
     
-        # 4. Clean Residual: Self + Gated Neighbors
-        final_vec = residual + gate_val * neighbor_agg
-        return torch.tanh(final_vec)
+    neighbor_agg = projected.max(dim=1)[0]  # [B, D] - SIMPLE & EFFECTIVE
+    
+    # ZERO gating - just residual add (0.3 weight)
+    self_emb = self.symbol_emb(entity_self_ids)
+    final_vec = 0.7 * self_emb + 0.3 * neighbor_agg  # FIXED BLEND
+    
+    return torch.tanh(final_vec)
 
 
     def forward(self, query, support, query_meta=None, support_meta=None):
