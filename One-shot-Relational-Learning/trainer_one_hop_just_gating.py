@@ -55,8 +55,7 @@ class Trainer(object):
             batch_size=self.batch_size,
             process_steps=self.process_steps,
             finetune=self.fine_tune,
-            aggregate=self.aggregate,
-            gate_temp=self.gate_temp
+            aggregate=self.aggregate
         )
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
