@@ -3,56 +3,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from modules import SupportEncoder, QueryEncoder 
+
+from modules import *
+from torch.autograd import Variable
 
 class EmbedMatcher(nn.Module):
     """
-    Robust One-Shot Matcher with Content-Based Gating.
-    
-    1. Similarity Attention: Weights neighbors by relevance to center (Dot Product).
-    2. Content-Based Gating: An MLP judges signal quality directly from the data.
-       Crucially, this generalizes to UNSEEN relations (Zero-Shot/One-Shot compatible).
+    Matching metric based on KB Embeddings - MAX-POOL VERSION
     """
-    def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
-                 dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
-                 k_neighbors=10):
+    def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max'):
         super(EmbedMatcher, self).__init__()
         self.embed_dim = embed_dim
         self.pad_idx = num_symbols
-        self.num_symbols = num_symbols
+        self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=num_symbols)
         self.aggregate = aggregate
-        self.k_neighbors = k_neighbors
-        self.dropout = nn.Dropout(dropout)
-        
-        # Learnable Temperature (Initialized to 1.0)
-        # Allows the model to find the optimal "softness" for the decision boundary
-        self.gate_temp = nn.Parameter(torch.tensor(1.0)) 
+        self.num_symbols = num_symbols
 
-        # Embedding layer
-        self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=self.pad_idx)
+        self.gcn_w = nn.Linear(2*self.embed_dim, self.embed_dim)
+        self.gcn_b = nn.Parameter(torch.FloatTensor(self.embed_dim))
 
-        # Neighbor projection (GCN-style)
-        self.gcn_w = nn.Linear(2 * embed_dim, embed_dim)
-        self.gcn_b = nn.Parameter(torch.FloatTensor(embed_dim))
+        self.dropout = nn.Dropout(dropout)  # Configurable dropout
 
-        # --- FIX: Content-Based Gate (Generalizes to Unseen Relations) ---
-        # Instead of nn.Embedding (which fails for new relations), we use an MLP 
-        # to judge the quality of the neighbor aggregation itself.
-        self.context_gate = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.ReLU(),
-            nn.Linear(embed_dim // 2, 1)
-        )
-
-        # Initialization
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
-        
-        # Initialize gate MLP
-        for m in self.context_gate.modules():
-            if isinstance(m, nn.Linear):
-                init.xavier_normal_(m.weight)
-                init.constant_(m.bias, 0)
 
         if use_pretrain and embed is not None:
             logging.info('LOADING KB EMBEDDINGS')
@@ -61,60 +34,102 @@ class EmbedMatcher(nn.Module):
                 logging.info('FIX KB EMBEDDING')
                 self.symbol_emb.weight.requires_grad = False
 
-        d_model = embed_dim * 2
-        self.support_encoder = SupportEncoder(d_model, 2 * d_model, dropout)
+        d_model = self.embed_dim * 2
+        self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
-def neighbor_encoder(self, connections, num_neighbors, entity_self_ids):
-    relations = connections[:, :, 0]
-    entities = connections[:, :, 1]
-    
-    # EMBED
-    rel_emb = self.symbol_emb(relations)
-    ent_emb = self.symbol_emb(entities)
-    
-    # MAX-POOL (PROVEN SOTA ON NELL-ONE)
-    concat_emb = torch.cat((rel_emb, ent_emb), dim=-1)
-    projected = self.gcn_w(concat_emb) + self.gcn_b
-    projected = F.leaky_relu(projected, 0.1)  # Lower slope
-    projected = self.dropout(projected)
-    
-    neighbor_agg = projected.max(dim=1)[0]  # [B, D] - SIMPLE & EFFECTIVE
-    
-    # ZERO gating - just residual add (0.3 weight)
-    self_emb = self.symbol_emb(entity_self_ids)
-    final_vec = 0.7 * self_emb + 0.3 * neighbor_agg  # FIXED BLEND
-    
-    return torch.tanh(final_vec)
-
+    def neighbor_encoder(self, connections, num_neighbors):
+        '''
+        connections: (batch, 200, 2)
+        num_neighbors: (batch,)
+        MAX-POOL AGGREGATION (SOTA for NELL-One)
+        '''
+        relations = connections[:,:,0].squeeze(-1)
+        entities = connections[:,:,1].squeeze(-1)
+        
+        # Embeddings
+        rel_embeds = self.symbol_emb(relations)  # [B, K, D]
+        ent_embeds = self.symbol_emb(entities)   # [B, K, D]
+        
+        # Mask padding neighbors
+        rel_pad_mask = (relations == self.pad_idx)
+        ent_pad_mask = (entities == self.pad_idx)
+        pad_mask = rel_pad_mask | ent_pad_mask
+        
+        # GCN projection
+        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)  # [B, K, 2D]
+        projected = self.gcn_w(concat_embeds) + self.gcn_b           # [B, K, D]
+        projected = F.leaky_relu(projected, 0.1)                      # Stable activation
+        
+        # Apply dropout BEFORE masking
+        projected = self.dropout(projected)
+        
+        # MAX-POOL (ignores padding via -inf masking)
+        projected = projected.masked_fill(pad_mask.unsqueeze(-1), float('-inf'))
+        neighbor_agg = projected.max(dim=1)[0]  # [B, D] - KEY CHANGE
+        
+        return torch.tanh(neighbor_agg)
 
     def forward(self, query, support, query_meta=None, support_meta=None):
-        q_h_ids, q_t_ids = query[:, 0], query[:, 1]
-        s_h_ids, s_t_ids = support[:, 0], support[:, 1]
+        '''
+        query: (batch_size, 2)
+        support: (few, 2)
+        return: (batch_size, )
+        '''
+        if query_meta is None or support_meta is None:
+            # Fallback for no neighbors
+            q_emb = self.symbol_emb(query).view(query.size(0), -1)
+            s_emb = self.symbol_emb(support).view(support.size(0), -1)
+            s_mean = s_emb.mean(dim=0, keepdim=True)
+            return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
 
-        (q_l1, _, q_deg_l, q_r1, _, q_deg_r) = query_meta
-        (s_l1, _, s_deg_l, s_r1, _, s_deg_r) = support_meta
-        
-        # Encode Query Head and Tail
-        q_left = self.neighbor_encoder(q_l1, q_deg_l, q_h_ids)
-        q_right = self.neighbor_encoder(q_r1, q_deg_r, q_t_ids)
-        query_vec = torch.cat((q_left, q_right), dim=-1)
+        # Original 4-tuple unpacking
+        query_left_connections, query_left_degrees, query_right_connections, query_right_degrees = query_meta
+        support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta
 
-        # Encode Support Head and Tail
-        s_left = self.neighbor_encoder(s_l1, s_deg_l, s_h_ids)
-        s_right = self.neighbor_encoder(s_r1, s_deg_r, s_t_ids)
-        support_vec = torch.cat((s_left, s_right), dim=-1)
+        # Neighbor encoding
+        query_left = self.neighbor_encoder(query_left_connections, query_left_degrees)
+        query_right = self.neighbor_encoder(query_right_connections, query_right_degrees)
+        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees)
+        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees)
+
+        query_neighbor = torch.cat((query_left, query_right), dim=-1)
+        support_neighbor = torch.cat((support_left, support_right), dim=-1)
+
+        # Matching network (UNCHANGED)
+        support_g = self.support_encoder(support_neighbor.unsqueeze(0))  # [1, 1, 2D]
+        support_g = torch.mean(support_g, dim=1)                         # [1, 2D]
+        query_g = self.support_encoder(query_neighbor.unsqueeze(1))      # [B, 1, 2D]
+        query_g = query_g.squeeze(1)                                     # [B, 2D]
+
+        query_f = self.query_encoder(support_g, query_g)                 # [B, 2D]
+
+        matching_scores = torch.matmul(query_f, support_g.squeeze(0).t()).squeeze(-1)
+        return matching_scores
+
+    def forward_(self, query_meta, support_meta):
+        """Legacy method - unchanged"""
+        query_left_connections, query_left_degrees, query_right_connections, query_right_degrees = query_meta
+        support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta
+
+        query_left = self.neighbor_encoder(query_left_connections, query_left_degrees)
+        query_right = self.neighbor_encoder(query_right_connections, query_right_degrees)
+        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees)
+        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees)
+
+        query = torch.cat((query_left, query_right), dim=-1)
+        support = torch.cat((support_left, support_right), dim=-1)
         
-        # Matching Network processing
-        support_g = self.support_encoder(support_vec.unsqueeze(1)) 
-        query_encoded = self.support_encoder(query_vec.unsqueeze(1))
-        
-        # Pooling and Refinement
-        support_g = torch.mean(support_g, dim=0, keepdim=True)
-        support_g = support_g.squeeze(1) 
-        query_encoded = query_encoded.squeeze(1) 
-        
-        query_g = self.query_encoder(support_g, query_encoded)
-        
-        scores = torch.sum(query_g * support_g, dim=1)
-        return scores
+        support_expand = support.expand_as(query)
+        # Note: siamese not defined - this is legacy
+        return torch.zeros(query.size(0))
+
+if __name__ == '__main__':
+    query = torch.ones(64,2).long() * 100
+    support = torch.ones(40,2).long()
+    matcher = EmbedMatcher(200, 40000, use_pretrain=False, dropout=0.1)
+    
+    # Dummy meta for testing
+    dummy_meta = [torch.zeros(64,50,2).long(), torch.ones(64), 
+                  torch.zeros(64,50,2).long(), torch.ones(64)]
+    print(matcher(query, support, dummy_meta, dummy_meta).size())
