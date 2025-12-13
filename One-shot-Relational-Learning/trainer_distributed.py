@@ -12,7 +12,8 @@ import random
 
 from args import read_options
 from data_loader import *
-from matcher import *
+#from matcher import *
+from matcher_max import *
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
