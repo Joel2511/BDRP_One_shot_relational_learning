@@ -10,7 +10,7 @@ from tqdm import tqdm
 import os
 import random
 
-from args import read_options
+from args_dense import read_options
 from data_loader import *
 from matcher_dist_dense import * #mean + distance neighbor encoding for dense graphs
 from tensorboardX import SummaryWriter
