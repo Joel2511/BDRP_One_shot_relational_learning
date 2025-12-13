@@ -13,7 +13,7 @@ class EmbedMatcher(nn.Module):
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, aggregate='max', 
-                 k_neighbors=10): 
+                 k_neighbors=10,gate_temp=1.0): 
         super(EmbedMatcher, self).__init__()
 
         self.embed_dim = embed_dim
