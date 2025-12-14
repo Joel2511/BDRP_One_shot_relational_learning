@@ -343,14 +343,21 @@ class Trainer(object):
                         scores_t = self.matcher(query_batch, support, query_meta, support_meta)
                     else:
                         scores_t = self.matcher(query_batch, support)
-                        if scores_t.dim() == 0:
-                            all_scores.append(scores_t.item())
-                        else:
-                            all_scores.extend(scores_t.detach().cpu().numpy())
-
-                true_score = all_scores[-1]
+                    
+                    # FIXED SCORES COLLECTION
+                    if scores_t.dim() == 0:
+                        all_scores.append(scores_t.item())
+                    else:
+                        all_scores.extend(scores_t.detach().cpu().numpy())
+                
+                # ENSURE NON-EMPTY
+                if not all_scores:
+                    all_scores = [0.0]
+                
+                true_score = all_scores[-1] if all_scores else 0.0
                 all_scores_np = np.array(all_scores)
                 rank = np.sum(all_scores_np > true_score) + 1
+
                 
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
