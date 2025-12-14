@@ -285,8 +285,19 @@ class Trainer(object):
         few = self.few
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Standard NELL filename
-        test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
+        if mode == 'dev':
+            # Try NELL/FB15k name first, then ATOMIC-style dev file
+            dev_path_std = os.path.join(self.dataset, 'validation_tasks.json')
+            dev_path_alt = os.path.join(self.dataset, 'dev_tasks.json')
+            if os.path.exists(dev_path_std):
+                test_tasks = json.load(open(dev_path_std))
+            elif os.path.exists(dev_path_alt):
+                test_tasks = json.load(open(dev_path_alt))
+            else:
+                raise FileNotFoundError(f"No dev tasks file found in {self.dataset}")
+        else:
+            test_tasks = json.load(open(os.path.join(self.dataset, 'test_tasks.json')))
+
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
 
@@ -344,7 +355,7 @@ class Trainer(object):
                     else:
                         scores_t = self.matcher(query_batch, support)
 
-                    if 'fb15k' in self.args.dataset.lower():
+                    if 'fb15k' in self.dataset.lower():
                         if scores_t.dim() == 0:  # 0-d scalar → 1d tensor
                             scores_t = scores_t.unsqueeze(0)
                         elif scores_t.dim() > 1:  # Unexpected higher dims → flatten
