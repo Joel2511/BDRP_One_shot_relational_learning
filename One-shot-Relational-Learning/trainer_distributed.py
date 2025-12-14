@@ -343,6 +343,12 @@ class Trainer(object):
                         scores_t = self.matcher(query_batch, support, query_meta, support_meta)
                     else:
                         scores_t = self.matcher(query_batch, support)
+
+                    if 'fb15k' in self.args.dataset.lower():
+                        if scores_t.dim() == 0:  # 0-d scalar → 1d tensor
+                            scores_t = scores_t.unsqueeze(0)
+                        elif scores_t.dim() > 1:  # Unexpected higher dims → flatten
+                            scores_t = scores_t.view(-1)
                     all_scores.extend(scores_t.detach().cpu().numpy())
 
                 true_score = all_scores[-1]
