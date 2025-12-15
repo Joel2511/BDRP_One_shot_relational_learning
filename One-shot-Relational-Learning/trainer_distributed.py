@@ -12,8 +12,8 @@ import random
 
 from args import read_options
 from data_loader import *
-from matcher import * #baseline mean
-#from matcher_max import * #max pooling only for nell-one(scarce ds)
+#from matcher import * #baseline mean
+from matcher_max import * #max pooling only for nell-one(scarce ds)
 ##mean + distance neighbor encoding for dense graphs
 from tensorboardX import SummaryWriter
 
