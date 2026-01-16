@@ -10,9 +10,9 @@ from tqdm import tqdm
 import os
 import random
 
-from args_dense import read_options
+from args import read_options
 from data_loader import *
-from matcher_dist_dense import * #mean + distance neighbor encoding for dense graphs
+from matcher import * #mean + distance neighbor encoding 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
@@ -386,7 +386,8 @@ class Trainer(object):
         self.eval(mode='test', meta=self.meta)
 
     def escape_token(self, token):
-        return token.replace(" ", "_")
+        import re
+        return re.sub(r'[^a-zA-Z0-9_]', '_', str(token))
 
 
 if __name__ == '__main__':
