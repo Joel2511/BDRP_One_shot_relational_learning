@@ -32,6 +32,9 @@ def read_options():
                         help="Number of closest neighbors to keep (for Distance Filtering).")
     #parser.add_argument("--gate_temp", default=1.0, type=float,
                         #help="Temperature parameter for soft sigmoid gating.")
+    parser.add_argument('--knn_k', type=int, default=32, help='k-NN neighbors')
+    parser.add_argument('--knn_alpha', type=float, default=0.5, help='self+knn interp')
+
     
     args = parser.parse_args()
     args.save_path = 'models/' + args.prefix
