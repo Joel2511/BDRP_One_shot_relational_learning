@@ -116,7 +116,6 @@ def load_embed(self):
         if self.embed_model in ['DistMult', 'TransE', 'RESCAL','TransH']:
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
-        
         elif self.embed_model == 'ComplEx':
             try:
                 ent_embed = np.loadtxt(ent_file)
@@ -131,7 +130,7 @@ def load_embed(self):
         else:
             raise ValueError(f"Unknown embed_model: {self.embed_model}")
 
-        # Normalize FIRST so structural data is standardized
+        # 1. Normalize FIRST so structural data is standardized
         if self.embed_model == 'ComplEx':
             ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
             ent_std = np.std(ent_embed, axis=1, keepdims=True)
@@ -141,13 +140,13 @@ def load_embed(self):
             ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
             rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
 
-        # Apply Weighted FastText anchors AFTER structural normalization
+        # 2. Apply Weighted FastText anchors AFTER structural normalization
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             logging.info('APPLYING WEIGHTED FASTTEXT SEMANTIC ANCHORS (Alpha=0.1)')
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
                 ft_anchors = np.load(ft_path)
-                # Weighted addition: Structural + 10% Semantic
+                # Weighted addition: Structural + 10% Semantic nudge
                 ent_embed = ent_embed + (0.1 * ft_anchors)
             else:
                 logging.error(f"FastText file not found at {ft_path}")
@@ -164,10 +163,10 @@ def load_embed(self):
                 symbol_id[key] = i
                 i += 1
                 embeddings.append(list(ent_embed[ent2id[key],:]))
-        symbol_id['PAD'] = i
-        embeddings.append(list(np.zeros((rel_embed.shape[1],))))
-        self.symbol2id = symbol_id
-        self.symbol2vec = np.array(embeddings)
+                symbol_id['PAD'] = i
+                embeddings.append(list(np.zeros((rel_embed.shape[1],))))
+                self.symbol2id = symbol_id
+                self.symbol2vec = np.array(embeddings)
 
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
