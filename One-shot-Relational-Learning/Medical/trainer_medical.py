@@ -85,7 +85,6 @@ class Trainer(object):
 
         print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
-    # --- UNIVERSAL SAFE LOADING ---
     def load_symbol2id(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
@@ -103,70 +102,70 @@ class Trainer(object):
         self.symbol2id = symbol_id
         self.symbol2vec = None
 
-def load_embed(self):
-        symbol_id = {}
-        rel2id = json.load(open(self.dataset + '/relation2ids'))
-        ent2id = json.load(open(self.dataset + '/ent2ids'))
-
-        logging.info('LOADING PRE-TRAINED EMBEDDING')
-        
-        ent_file = self.dataset + '/entity2vec.' + self.embed_model
-        rel_file = self.dataset + '/relation2vec.' + self.embed_model
-
-        if self.embed_model in ['DistMult', 'TransE', 'RESCAL','TransH']:
-            ent_embed = np.loadtxt(ent_file)
-            rel_embed = np.loadtxt(rel_file)
-        elif self.embed_model == 'ComplEx':
-            try:
+    def load_embed(self):
+            symbol_id = {}
+            rel2id = json.load(open(self.dataset + '/relation2ids'))
+            ent2id = json.load(open(self.dataset + '/ent2ids'))
+    
+            logging.info('LOADING PRE-TRAINED EMBEDDING')
+            
+            ent_file = self.dataset + '/entity2vec.' + self.embed_model
+            rel_file = self.dataset + '/relation2vec.' + self.embed_model
+    
+            if self.embed_model in ['DistMult', 'TransE', 'RESCAL','TransH']:
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
-                logging.info("Loaded ComplEx as standard floats.")
-            except ValueError:
-                logging.info("Standard load failed. Flattening complex strings...")
-                ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
-                rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
-                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
-                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
-        else:
-            raise ValueError(f"Unknown embed_model: {self.embed_model}")
-
-        # 1. Normalize FIRST so structural data is standardized
-        if self.embed_model == 'ComplEx':
-            ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
-            ent_std = np.std(ent_embed, axis=1, keepdims=True)
-            rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
-            rel_std = np.std(rel_embed, axis=1, keepdims=True)
-            eps = 1e-3
-            ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
-            rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
-
-        # 2. Apply Weighted FastText anchors AFTER structural normalization
-        if hasattr(self, 'use_fasttext') and self.use_fasttext:
-            logging.info('APPLYING WEIGHTED FASTTEXT SEMANTIC ANCHORS (Alpha=0.1)')
-            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
-            if os.path.exists(ft_path):
-                ft_anchors = np.load(ft_path)
-                # Weighted addition: Structural + 10% Semantic nudge
-                ent_embed = ent_embed + (0.1 * ft_anchors)
+            elif self.embed_model == 'ComplEx':
+                try:
+                    ent_embed = np.loadtxt(ent_file)
+                    rel_embed = np.loadtxt(rel_file)
+                    logging.info("Loaded ComplEx as standard floats.")
+                except ValueError:
+                    logging.info("Standard load failed. Flattening complex strings...")
+                    ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
+                    rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
+                    ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
+                    rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
             else:
-                logging.error(f"FastText file not found at {ft_path}")
-
-        embeddings = []
-        i = 0
-        for key in rel2id.keys():
-            if key not in ['','OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(rel_embed[rel2id[key],:]))
-        for key in ent2id.keys():
-            if key not in ['', 'OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(ent_embed[ent2id[key],:]))
-                symbol_id['PAD'] = i
-                embeddings.append(list(np.zeros((rel_embed.shape[1],))))
-                self.symbol2id = symbol_id
-                self.symbol2vec = np.array(embeddings)
+                raise ValueError(f"Unknown embed_model: {self.embed_model}")
+    
+            # 1. Normalize FIRST so structural data is standardized
+            if self.embed_model == 'ComplEx':
+                ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
+                ent_std = np.std(ent_embed, axis=1, keepdims=True)
+                rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
+                rel_std = np.std(rel_embed, axis=1, keepdims=True)
+                eps = 1e-3
+                ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
+                rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
+    
+            # 2. Apply Weighted FastText anchors AFTER structural normalization
+            if hasattr(self, 'use_fasttext') and self.use_fasttext:
+                logging.info('APPLYING WEIGHTED FASTTEXT SEMANTIC ANCHORS (Alpha=0.1)')
+                ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
+                if os.path.exists(ft_path):
+                    ft_anchors = np.load(ft_path)
+                    # Weighted addition: Structural + 10% Semantic nudge
+                    ent_embed = ent_embed + (0.1 * ft_anchors)
+                else:
+                    logging.error(f"FastText file not found at {ft_path}")
+    
+            embeddings = []
+            i = 0
+            for key in rel2id.keys():
+                if key not in ['','OOV']:
+                    symbol_id[key] = i
+                    i += 1
+                    embeddings.append(list(rel_embed[rel2id[key],:]))
+            for key in ent2id.keys():
+                if key not in ['', 'OOV']:
+                    symbol_id[key] = i
+                    i += 1
+                    embeddings.append(list(ent_embed[ent2id[key],:]))
+                    symbol_id['PAD'] = i
+                    embeddings.append(list(np.zeros((rel_embed.shape[1],))))
+                    self.symbol2id = symbol_id
+                    self.symbol2vec = np.array(embeddings)
 
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
