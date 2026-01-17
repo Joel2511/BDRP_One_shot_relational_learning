@@ -119,12 +119,10 @@ class Trainer(object):
         
         elif self.embed_model == 'ComplEx':
             try:
-                # Try float first (NELL style)
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
                 logging.info("Loaded ComplEx as standard floats.")
             except ValueError:
-                # Try complex string (ATOMIC style)
                 logging.info("Standard load failed. Flattening complex strings...")
                 ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
                 rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
@@ -132,6 +130,17 @@ class Trainer(object):
                 rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
         else:
             raise ValueError(f"Unknown embed_model: {self.embed_model}")
+
+        # Loads FastText anchors if flag is set
+        if hasattr(self, 'use_fasttext') and self.use_fasttext:
+            logging.info('ADDING FASTTEXT SEMANTIC ANCHORS')
+            # Adjust path to parent 'Medical' directory
+            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
+            if os.path.exists(ft_path):
+                ft_anchors = np.load(ft_path)
+                ent_embed = ent_embed + ft_anchors
+            else:
+                logging.error(f"FastText file not found at {ft_path}")
 
         if self.embed_model == 'ComplEx':
             ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
