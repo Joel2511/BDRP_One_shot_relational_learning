@@ -34,6 +34,7 @@ def read_options():
                         #help="Temperature parameter for soft sigmoid gating.")
     parser.add_argument('--knn_k', type=int, default=32, help='k-NN neighbors')
     parser.add_argument('--knn_alpha', type=float, default=0.5, help='self+knn interp')
+    parser.add_argument('--use_fasttext', action='store_true', help='Use FastText semantic anchors')
 
     
     args = parser.parse_args()
