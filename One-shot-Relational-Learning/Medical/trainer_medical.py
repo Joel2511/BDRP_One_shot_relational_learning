@@ -103,7 +103,7 @@ class Trainer(object):
         self.symbol2id = symbol_id
         self.symbol2vec = None
 
-    def load_embed(self):
+def load_embed(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
@@ -131,17 +131,7 @@ class Trainer(object):
         else:
             raise ValueError(f"Unknown embed_model: {self.embed_model}")
 
-        # Loads FastText anchors if flag is set
-        if hasattr(self, 'use_fasttext') and self.use_fasttext:
-            logging.info('ADDING FASTTEXT SEMANTIC ANCHORS')
-            # Adjust path to parent 'Medical' directory
-            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
-            if os.path.exists(ft_path):
-                ft_anchors = np.load(ft_path)
-                ent_embed = ent_embed + ft_anchors
-            else:
-                logging.error(f"FastText file not found at {ft_path}")
-
+        # Normalize FIRST so structural data is standardized
         if self.embed_model == 'ComplEx':
             ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
             ent_std = np.std(ent_embed, axis=1, keepdims=True)
@@ -150,6 +140,17 @@ class Trainer(object):
             eps = 1e-3
             ent_embed = (ent_embed - ent_mean) / (ent_std + eps)
             rel_embed = (rel_embed - rel_mean) / (rel_std + eps)
+
+        # Apply Weighted FastText anchors AFTER structural normalization
+        if hasattr(self, 'use_fasttext') and self.use_fasttext:
+            logging.info('APPLYING WEIGHTED FASTTEXT SEMANTIC ANCHORS (Alpha=0.1)')
+            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
+            if os.path.exists(ft_path):
+                ft_anchors = np.load(ft_path)
+                # Weighted addition: Structural + 10% Semantic
+                ent_embed = ent_embed + (0.1 * ft_anchors)
+            else:
+                logging.error(f"FastText file not found at {ft_path}")
 
         embeddings = []
         i = 0
