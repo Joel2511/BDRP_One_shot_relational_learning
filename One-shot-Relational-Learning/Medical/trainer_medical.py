@@ -225,7 +225,7 @@ class Trainer(object):
         losses = deque([], self.log_every)
         margins = deque([], self.log_every)
 
-        # 1. Penalty Map - Higher weights for rare biological interactions
+        # 1. Penalty Map
         rel_weight_map = {
             'positivelyRegulatesGO': 15.0, 
             'negativelyRegulatesGO': 15.0, 
@@ -243,8 +243,16 @@ class Trainer(object):
                 weight_tensor[rel_idx] = weight
                 logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
 
-        # 2. Generator Loop - Now correctly unpacking 10 values
-        for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+        # 2. Generator Loop - Explicitly calling the NEW unique function name
+        # Change 'train_generate' to 'train_generate_medical' here:
+        from data_loader import train_generate_medical 
+        
+        for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+            
+            # SANITY CHECK: Stop immediately if the loader is broken
+            if len(data) != 10:
+                raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10. Check data_loader.py yield statement.")
+
             support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
 
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
@@ -255,7 +263,7 @@ class Trainer(object):
             query   = torch.LongTensor(query_p).to(self.device, non_blocking=True)
             false   = torch.LongTensor(false_p).to(self.device, non_blocking=True)
 
-            # --- DYNAMIC WEIGHT LOOKUP ---
+            # WEIGHT LOOKUP
             esc_rel_name = self.escape_token(rel_name)
             rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
             task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
@@ -270,7 +278,7 @@ class Trainer(object):
             margin_ = query_scores - false_scores
             margins.append(margin_.mean().item())
             
-            # Weighted Loss: The Optimizer now prioritizes rare relation accuracy
+            # Weighted Loss
             loss = (F.relu(self.margin - margin_) * task_weight).mean()
             
             losses.append(loss.item())
