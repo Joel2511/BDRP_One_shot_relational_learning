@@ -115,9 +115,6 @@ class EmbedMatcher(nn.Module):
         return knn_mean
 
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
-            '''
-            Max-Pooling Neighbor Encoder: Better for sparse medical nodes
-            '''
             num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
             relations = connections[:,:,0].squeeze(-1)
             entities = connections[:,:,1].squeeze(-1)
@@ -125,27 +122,22 @@ class EmbedMatcher(nn.Module):
             rel_embeds = self.dropout(self.symbol_emb(relations))
             ent_embeds = self.dropout(self.symbol_emb(entities))
             
-            # [Batch, Max_Neighbors, 2*Dim]
             concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
             out = self.gcn_w(concat_embeds)
             
-            # --- SOLUTION FOR ONE-SHOT SPARSITY ---
-            # Instead of averaging (which dilutes rare links), we take the MAX signal.
-            # This highlights the most 'distinctive' neighbor for the 1-shot task.
-            out, _ = torch.max(out, dim=1) 
+            # BACK TO MEAN: Research shows medical nodes need neighbor averaging
+            out = torch.sum(out, dim=1) / num_neighbors
             structural_repr = out.tanh()
     
-            # 2. k-NN MEAN (Semantic extension)
+            # k-NN interpolation (KEEP THIS - it's your strongest feature)
             knn_mean = None
             if entity_ids is not None and self.knn_neighbors is not None:
                 knn_mean = self.knn_neighbor_encoder(entity_ids)
     
-            # 3. INTERPOLATE
             if knn_mean is not None:
                 final = self.knn_alpha * structural_repr + (1 - self.knn_alpha) * knn_mean
             else:
                 final = structural_repr
-                
             return final
 
     def forward(self, query, support, query_meta=None, support_meta=None, entity_ids=None):
