@@ -152,8 +152,8 @@ class Trainer(object):
                 if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 400:
                     ft_anchors = np.tile(ft_anchors, (1, 2))
                 
-                # Combine: Structural (1.0) + Semantic (0.2 weighting)
-                ent_embed = ent_embed + (0.2 * ft_anchors)
+                # Combine: Structural (1.0) + Semantic (0.05 weighting)
+                ent_embed = ent_embed + (0.05 * ft_anchors)
                 logging.info('Semantic anchors integrated successfully.')
             else:
                 logging.error(f"FastText file not found at {ft_path}")
