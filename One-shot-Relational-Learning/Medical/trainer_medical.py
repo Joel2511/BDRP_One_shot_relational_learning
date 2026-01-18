@@ -279,7 +279,19 @@ class Trainer(object):
             margins.append(margin_.mean().item())
             
             # Weighted Loss
-            loss = (F.relu(self.margin - margin_) * task_weight).mean()
+            # loss = (F.relu(self.margin - margin_) * task_weight).mean()
+            adv_temperature = 0.5  # Standard research value for RotatE/FSRL
+            
+            # 1. Identify hard negatives using Softmax
+            with torch.no_grad():
+                adv_weights = F.softmax(false_scores * adv_temperature, dim=-1)
+            
+            # 2. Compute the weighted average of the negative scores
+            adversarial_false = (adv_weights * false_scores).sum(dim=-1)
+            
+            # 3. Final Margin Loss with task-specific penalty
+            # This forces the model to discriminate against the hardest entities
+            loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
             
             losses.append(loss.item())
             self.optim.zero_grad()
