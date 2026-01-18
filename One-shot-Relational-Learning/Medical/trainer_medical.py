@@ -217,13 +217,13 @@ class Trainer(object):
         right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
 
-    # --- TRAINING LOOP ---
     def train(self):
             logging.info('START TRAINING...')
             best_hits10 = 0.0
             losses = deque([], self.log_every)
             margins = deque([], self.log_every)
     
+            # 1. Relation Weight Configuration
             rel_weight_map = {
                 'positivelyRegulatesGO': 15.0, 
                 'negativelyRegulatesGO': 15.0, 
@@ -233,37 +233,37 @@ class Trainer(object):
                 'isAssociatedWithGO': 1.0
             }
             
-            # Initialize weight tensor with 1.0 (default weight)
+            # Initialize weight tensor; default weight is 1.0
             weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
             for rel_name, weight in rel_weight_map.items():
                 esc_name = self.escape_token(rel_name)
                 if esc_name in self.symbol2id:
                     rel_idx = self.symbol2id[esc_name]
                     weight_tensor[rel_idx] = weight
-                    logging.info(f"Weight Assigned - {rel_name} (ID: {rel_idx}): {weight}")
+                    logging.info(f"Penalty Weight Set - {rel_name} (ID: {rel_idx}): {weight}")
     
-            # 2. Extract relation name from the generator directly
-            # The train_generate yields: (support, query, false, s_left, s_right, q_left, q_right, f_left, f_right)
-            # We wrap it to access the task relation name if your loader supports it, 
-            # or we derive it from the training tasks dictionary keys.
-            
+            # 2. Training Loop - Accessing the extra 'rel_name' from updated data_loader
             for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-                support_pairs, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
+                # Unpacking all 10 values yielded by the generator
+                support_pairs, query_pairs, false_pairs, support_left, support_right, query_left, query_right, false_left, false_right, rel_name = data
     
+                # Meta-data processing
                 support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
                 query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
                 false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
     
+                # Tensor conversion
                 support = torch.LongTensor(support_pairs).to(self.device, non_blocking=True)
-                query   = torch.LongTensor(query).to(self.device, non_blocking=True)
-                false   = torch.LongTensor(false).to(self.device, non_blocking=True)
+                query   = torch.LongTensor(query_pairs).to(self.device, non_blocking=True)
+                false   = torch.LongTensor(false_pairs).to(self.device, non_blocking=True)
     
-
-                rel_id = query_left_connections[0, 0, 0].item() # Extract from connection matrix metadata
-                
-
+                # --- PENALTY WEIGHT LOGIC ---
+                # Retrieve the specific weight for the current task relation
+                esc_rel_name = self.escape_token(rel_name)
+                rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
                 task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
     
+                # Forward pass
                 if self.no_meta:
                     query_scores = self.matcher(query, support)
                     false_scores = self.matcher(false, support)
@@ -271,24 +271,28 @@ class Trainer(object):
                     query_scores = self.matcher(query, support, query_meta, support_meta)
                     false_scores = self.matcher(false, support, false_meta, support_meta)
     
+                # Margin loss with Relation Penalty
                 margin_ = query_scores - false_scores
                 margins.append(margin_.mean().item())
                 
-                # Apply weighted loss
+                # Applying weighted loss multiplier
                 loss = (F.relu(self.margin - margin_) * task_weight).mean()
                 
                 if self.writer:
                     self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
     
+                # Optimization step
                 losses.append(loss.item())
                 self.optim.zero_grad()
                 loss.backward()
                 self.optim.step()
     
+                # Logging
                 if self.batch_nums % self.log_every == 0:
                     avg_loss = np.mean(losses)
-                    logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Weight: {task_weight:.1f})")
+                    logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Rel: {rel_name}, Wt: {task_weight:.1f})")
     
+                # Evaluation and Checkpointing
                 if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
                     hits10, hits5, mrr = self.eval(meta=self.meta)
                     self.save()
@@ -299,6 +303,7 @@ class Trainer(object):
                 self.batch_nums += 1
                 self.scheduler.step()
     
+                # Force Exit and Final Evaluation
                 if self.batch_nums >= self.max_batches:
                     logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
                     hits10, hits5, mrr = self.eval(meta=self.meta)
