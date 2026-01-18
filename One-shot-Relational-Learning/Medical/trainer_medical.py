@@ -280,17 +280,21 @@ class Trainer(object):
             
             # Weighted Loss
             # loss = (F.relu(self.margin - margin_) * task_weight).mean()
-            adv_temperature = 0.5  # Standard research value for RotatE/FSRL
+            # --- CORRECTED SELF-ADVERSARIAL LOSS ---
+            adv_temperature = 0.5 
             
-            # 1. Identify hard negatives using Softmax
+            # Reshape false_scores to [batch, negs] if not already
+            # Assuming batch_size=128, neg_num=50
+            f_scores = false_scores.view(self.batch_size, -1) 
+            
             with torch.no_grad():
-                adv_weights = F.softmax(false_scores * adv_temperature, dim=-1)
+                # Softmax across the negative samples for EACH query
+                adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
             
-            # 2. Compute the weighted average of the negative scores
-            adversarial_false = (adv_weights * false_scores).sum(dim=-1)
+            # Weighted average of negative scores per query
+            adversarial_false = (adv_weights * f_scores).sum(dim=-1)
             
-            # 3. Final Margin Loss with task-specific penalty
-            # This forces the model to discriminate against the hardest entities
+            # query_scores shape is [batch_size]
             loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
             
             losses.append(loss.item())
