@@ -111,8 +111,8 @@ def train_generate(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2):
         yield support_pairs, query_pairs, false_pairs, support_left, support_right, query_left, query_right, false_left, false_right
 
 
-def train_generate_(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, num_neg=1):
-    logging.info('LOADING TRAINING DATA')
+def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, num_neg=1):
+    logging.info('LOADING MEDICAL TRAINING DATA')
     train_tasks = json.load(open(dataset + '/train_tasks.json'))
     logging.info('LOADING CANDIDATES')
     rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
