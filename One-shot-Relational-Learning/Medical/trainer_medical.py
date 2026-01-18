@@ -154,8 +154,8 @@ class Trainer(object):
                     ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
                 
                 # Combine: Structural (1.0) + Semantic (0.05 weighting)
-                # We reduced weight to 0.05 to prevent semantics from overpowering the 100D structure
-                ent_embed = ent_embed + (0.05 * ft_anchors)
+                # weight to 0.15 to prevent semantics from overpowering the 100D structure
+                ent_embed = ent_embed + (0.15 * ft_anchors)
                 logging.info('Semantic anchors integrated successfully.')
             else:
                 logging.error(f"FastText file not found at {ft_path}")
