@@ -212,59 +212,78 @@ class Trainer(object):
 
     # --- TRAINING LOOP ---
     def train(self):
-        logging.info('START TRAINING...')
-        best_hits10 = 0.0
-        losses = deque([], self.log_every)
-        margins = deque([], self.log_every)
-
-        for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-            support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
-
-            support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
-            query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
-            false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
-
-            support = torch.LongTensor(support).pin_memory().to(self.device, non_blocking=True)
-            query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
-            false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
-
-            if self.no_meta:
-                query_scores = self.matcher(query, support)
-                false_scores = self.matcher(false, support)
-            else:
-                query_scores = self.matcher(query, support, query_meta, support_meta)
-                false_scores = self.matcher(false, support, false_meta, support_meta)
-
-            margin_ = query_scores - false_scores
-            margins.append(margin_.mean().item())
-            loss = F.relu(self.margin - margin_).mean()
-            
-            if self.writer:
-                self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
-
-            losses.append(loss.item())
-            self.optim.zero_grad()
-            loss.backward()
-            self.optim.step()
-
-            if self.batch_nums % self.log_every == 0:
-                avg_loss = np.mean(losses)
-                logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}")
+            logging.info('START TRAINING...')
+            best_hits10 = 0.0
+            losses = deque([], self.log_every)
+            margins = deque([], self.log_every)
+    
+            # Pre-calculate Weights based on your Relation Distribution
+            # Rare relations (count < 500) get high penalty, common get low.
+            rel_weight_map = {
+                # Based on your logs: Rare biological links get 10x priority
+                'positivelyRegulatesGO': 10.0, 'negativelyRegulatesGO': 10.0, 
+                'regulatesGO': 10.0, 'hasGeneticInteractionWith': 5.0,
+                # Common links stay at 1.0
+                'hasGeneExpressionOA': 1.0, 'isAssociatedWithGO': 1.0
+            }
+            # Map strings to IDs for the loop
+            weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
+            for rel_name, weight in rel_weight_map.items():
+                if rel_name in self.symbol2id:
+                    weight_tensor[self.symbol2id[rel_name]] = weight
+    
+            for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+                support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
+    
+                support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
+                query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
+                false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
+    
+                support = torch.LongTensor(support).to(self.device, non_blocking=True)
+                query   = torch.LongTensor(query).to(self.device, non_blocking=True)
+                false   = torch.LongTensor(false).to(self.device, non_blocking=True)
+    
+                # Support[0, 1] is the Relation ID for this one-shot task
+                rel_id = support[0, 1].item()
+                task_weight = weight_tensor[rel_id]
+    
+                if self.no_meta:
+                    query_scores = self.matcher(query, support)
+                    false_scores = self.matcher(false, support)
+                else:
+                    query_scores = self.matcher(query, support, query_meta, support_meta)
+                    false_scores = self.matcher(false, support, false_meta, support_meta)
+    
+                margin_ = query_scores - false_scores
+                margins.append(margin_.mean().item())
+                
+                # Apply the task_weight here to penalize mistakes on rare relations more heavily
+                loss = (F.relu(self.margin - margin_) * task_weight).mean()
+                
                 if self.writer:
-                    self.writer.add_scalar('Avg_batch_loss', avg_loss, self.batch_nums)
-
-            if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
-                hits10, hits5, mrr = self.eval(meta=self.meta)
-                if self.writer:
-                    self.writer.add_scalar('HITS10', hits10, self.batch_nums)
-                    self.writer.add_scalar('MAP', mrr, self.batch_nums)
-                self.save()
-                if hits10 > best_hits10:
-                    self.save(self.save_path + '_bestHits10')
-                    best_hits10 = hits10
-
-            self.batch_nums += 1
-            self.scheduler.step()
+                    self.writer.add_scalar('MARGIN', np.mean(margins), self.batch_nums)
+    
+                losses.append(loss.item())
+                self.optim.zero_grad()
+                loss.backward()
+                self.optim.step()
+    
+                if self.batch_nums % self.log_every == 0:
+                    avg_loss = np.mean(losses)
+                    logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Weight: {task_weight:.1f})")
+    
+                if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
+                    hits10, hits5, mrr = self.eval(meta=self.meta)
+                    self.save()
+                    if hits10 > best_hits10:
+                        self.save(self.save_path + '_bestHits10')
+                        best_hits10 = hits10
+    
+                self.batch_nums += 1
+                self.scheduler.step()
+                
+                if self.batch_nums >= self.max_batches:
+                    break
             
             # FORCE EXIT with EVAL
             if self.batch_nums >= self.max_batches:
