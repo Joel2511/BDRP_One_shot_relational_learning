@@ -141,10 +141,17 @@ class Trainer(object):
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
-                logging.info('APPLYING SCALED SEMANTIC ANCHORS')
+                logging.info('APPLYING SCALED SEMANTIC ANCHORS (Broadcasting to 400D)')
                 ft_anchors = np.load(ft_path)
-                # Standardize FastText so it matches ComplEx scale (Std=1)
+                
+                # Standardize FastText scale
                 ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
+                
+                # --- NEW FIX: TILE TO 400D ---
+                # This repeats the 200D anchors to match the 400D ComplEx shape
+                if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 400:
+                    ft_anchors = np.tile(ft_anchors, (1, 2))
+                
                 # Combine: Structural (1.0) + Semantic (0.2 weighting)
                 ent_embed = ent_embed + (0.2 * ft_anchors)
                 logging.info('Semantic anchors integrated successfully.')
