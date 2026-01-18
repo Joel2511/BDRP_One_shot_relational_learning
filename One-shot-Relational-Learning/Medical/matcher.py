@@ -150,9 +150,16 @@ class EmbedMatcher(nn.Module):
         query_g = query_g.squeeze(1)
         
         # Query Encoding (Refining query relative to support)
-        query_f = self.query_encoder(support_g, query_g)
+        # query_f = self.query_encoder(support_g, query_g)
         
-        # Dot product for final matching score
+        # # Dot product for final matching score
+        # matching_scores = torch.matmul(query_f, support_g.squeeze(0).t()).squeeze(-1)
+        # return matching_scores
+        # Replace the final matching score block with this:
+        query_f = F.normalize(query_f, p=2, dim=-1)
+        support_g = F.normalize(support_g, p=2, dim=-1)
+        
+        # matching_scores is now strictly Cosine Similarity [-1, 1]
         matching_scores = torch.matmul(query_f, support_g.squeeze(0).t()).squeeze(-1)
         return matching_scores
 
