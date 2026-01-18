@@ -115,37 +115,38 @@ class EmbedMatcher(nn.Module):
         return knn_mean
 
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
-        '''
-        ORIGINAL MEAN + k-NN extension for dense graphs
-        connections: (batch, 200, 2) - structural neighbors
-        num_neighbors: (batch,)
-        entity_ids: (batch,) - NEW for k-NN lookup
-        '''
-        # 1. ORIGINAL STRUCTURAL MEAN (baseline)
-        num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
-        relations = connections[:,:,0].squeeze(-1)
-        entities = connections[:,:,1].squeeze(-1)
-        rel_embeds = self.dropout(self.symbol_emb(relations))
-        ent_embeds = self.dropout(self.symbol_emb(entities))
-        
-        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
-        out = self.gcn_w(concat_embeds)
-        out = torch.sum(out, dim=1)
-        out = out / num_neighbors
-        structural_mean = out.tanh()
-
-        # 2. k-NN MEAN (dense graph extension)
-        knn_mean = None
-        if entity_ids is not None and self.knn_neighbors is not None:
-            knn_mean = self.knn_neighbor_encoder(entity_ids)
-
-        # 3. INTERPOLATE (Phase 2)
-        if knn_mean is not None:
-            final = self.knn_alpha * structural_mean + (1 - self.knn_alpha) * knn_mean
-        else:
-            final = structural_mean
+            '''
+            Max-Pooling Neighbor Encoder: Better for sparse medical nodes
+            '''
+            num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
+            relations = connections[:,:,0].squeeze(-1)
+            entities = connections[:,:,1].squeeze(-1)
             
-        return final
+            rel_embeds = self.dropout(self.symbol_emb(relations))
+            ent_embeds = self.dropout(self.symbol_emb(entities))
+            
+            # [Batch, Max_Neighbors, 2*Dim]
+            concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
+            out = self.gcn_w(concat_embeds)
+            
+            # --- SOLUTION FOR ONE-SHOT SPARSITY ---
+            # Instead of averaging (which dilutes rare links), we take the MAX signal.
+            # This highlights the most 'distinctive' neighbor for the 1-shot task.
+            out, _ = torch.max(out, dim=1) 
+            structural_repr = out.tanh()
+    
+            # 2. k-NN MEAN (Semantic extension)
+            knn_mean = None
+            if entity_ids is not None and self.knn_neighbors is not None:
+                knn_mean = self.knn_neighbor_encoder(entity_ids)
+    
+            # 3. INTERPOLATE
+            if knn_mean is not None:
+                final = self.knn_alpha * structural_repr + (1 - self.knn_alpha) * knn_mean
+            else:
+                final = structural_repr
+                
+            return final
 
     def forward(self, query, support, query_meta=None, support_meta=None, entity_ids=None):
         '''
