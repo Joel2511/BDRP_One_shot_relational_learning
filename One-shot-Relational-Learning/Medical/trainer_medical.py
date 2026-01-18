@@ -224,35 +224,45 @@ class Trainer(object):
             losses = deque([], self.log_every)
             margins = deque([], self.log_every)
     
-            # Pre-calculate Weights based on your Relation Distribution
-            # Rare relations (count < 500) get high penalty, common get low.
             rel_weight_map = {
-                # Based on your logs: Rare biological links get 10x priority
-                'positivelyRegulatesGO': 10.0, 'negativelyRegulatesGO': 10.0, 
-                'regulatesGO': 10.0, 'hasGeneticInteractionWith': 5.0,
-                # Common links stay at 1.0
-                'hasGeneExpressionOA': 1.0, 'isAssociatedWithGO': 1.0
+                'positivelyRegulatesGO': 15.0, 
+                'negativelyRegulatesGO': 15.0, 
+                'regulatesGO': 10.0, 
+                'hasGeneticInteractionWith': 5.0,
+                'hasGeneExpressionOA': 1.0, 
+                'isAssociatedWithGO': 1.0
             }
-            # Map strings to IDs for the loop
+            
+            # Initialize weight tensor with 1.0 (default weight)
             weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
             for rel_name, weight in rel_weight_map.items():
-                if rel_name in self.symbol2id:
-                    weight_tensor[self.symbol2id[rel_name]] = weight
+                esc_name = self.escape_token(rel_name)
+                if esc_name in self.symbol2id:
+                    rel_idx = self.symbol2id[esc_name]
+                    weight_tensor[rel_idx] = weight
+                    logging.info(f"Weight Assigned - {rel_name} (ID: {rel_idx}): {weight}")
     
+            # 2. Extract relation name from the generator directly
+            # The train_generate yields: (support, query, false, s_left, s_right, q_left, q_right, f_left, f_right)
+            # We wrap it to access the task relation name if your loader supports it, 
+            # or we derive it from the training tasks dictionary keys.
+            
             for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-                support, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
+                support_pairs, query, false, support_left, support_right, query_left, query_right, false_left, false_right = data
     
                 support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(support_left, support_right))
                 query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(query_left, query_right))
                 false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(false_left, false_right))
     
-                support = torch.LongTensor(support).to(self.device, non_blocking=True)
+                support = torch.LongTensor(support_pairs).to(self.device, non_blocking=True)
                 query   = torch.LongTensor(query).to(self.device, non_blocking=True)
                 false   = torch.LongTensor(false).to(self.device, non_blocking=True)
     
-                # Support[0, 1] is the Relation ID for this one-shot task
-                rel_id = support[0, 1].item()
-                task_weight = weight_tensor[rel_id]
+
+                rel_id = query_left_connections[0, 0, 0].item() # Extract from connection matrix metadata
+                
+
+                task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
     
                 if self.no_meta:
                     query_scores = self.matcher(query, support)
@@ -264,7 +274,7 @@ class Trainer(object):
                 margin_ = query_scores - false_scores
                 margins.append(margin_.mean().item())
                 
-                # Apply the task_weight here to penalize mistakes on rare relations more heavily
+                # Apply weighted loss
                 loss = (F.relu(self.margin - margin_) * task_weight).mean()
                 
                 if self.writer:
@@ -289,7 +299,6 @@ class Trainer(object):
                 self.batch_nums += 1
                 self.scheduler.step()
     
-                # --- INDENTED PROPERLY: This must stay inside the 'for data in...' loop ---
                 if self.batch_nums >= self.max_batches:
                     logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
                     hits10, hits5, mrr = self.eval(meta=self.meta)
