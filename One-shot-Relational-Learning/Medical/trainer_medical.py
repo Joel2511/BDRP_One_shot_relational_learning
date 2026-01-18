@@ -281,9 +281,7 @@ class Trainer(object):
     
                 self.batch_nums += 1
                 self.scheduler.step()
-                
-                if self.batch_nums >= self.max_batches:
-                    break
+
             
             # FORCE EXIT with EVAL
             if self.batch_nums >= self.max_batches:
