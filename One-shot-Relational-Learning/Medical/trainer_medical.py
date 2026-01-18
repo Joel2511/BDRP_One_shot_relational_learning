@@ -281,15 +281,14 @@ class Trainer(object):
     
                 self.batch_nums += 1
                 self.scheduler.step()
-
-            
-            # FORCE EXIT with EVAL
-            if self.batch_nums >= self.max_batches:
-                logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
-                hits10, hits5, mrr = self.eval(meta=self.meta)
-                logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
-                self.save()
-                break
+    
+                # --- INDENTED PROPERLY: This must stay inside the 'for data in...' loop ---
+                if self.batch_nums >= self.max_batches:
+                    logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
+                    hits10, hits5, mrr = self.eval(meta=self.meta)
+                    logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
+                    self.save()
+                    break
 
     # --- SAVE / LOAD ---
     def save(self, path="models/initial"):
