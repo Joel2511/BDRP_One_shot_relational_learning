@@ -245,7 +245,6 @@ class Trainer(object):
 
         # 2. Generator Loop - Now correctly unpacking 10 values
         for data in train_generate(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-            # The unpacking order MUST match the yield in data_loader.py
             support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
 
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
