@@ -282,16 +282,28 @@ class Trainer(object):
                 false_scores = self.matcher(false, support, false_meta, support_meta)
     
             adv_temperature = 0.5 
-            f_scores = false_scores.view(query_scores.size(0), -1) if false_scores.numel() > 1 else false_scores.unsqueeze(1)
-            with torch.no_grad():
-                adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
-            adversarial_false = (adv_weights * f_scores).sum(dim=-1)
-            loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
+            f_scores = []
+            start_idx = 0
+            for q_idx in range(query_scores.size(0)):
+                # Number of negatives for this query
+                n_neg = query[q_idx].size(0) if query.ndim > 1 else len(false[q_idx]) if hasattr(false[q_idx], '__len__') else 1
+                end_idx = start_idx + n_neg
+                f_scores.append(false_scores[start_idx:end_idx])
+                start_idx = end_idx
+            
+            adv_false_scores = torch.stack([
+                (F.softmax(fs * adv_temperature, dim=-1) * fs).sum()
+                if fs.numel() > 1 else fs[0]
+                for fs in f_scores
+            ])
+            
+            loss = (F.relu(self.margin - (query_scores - adv_false_scores)) * task_weight).mean()
             
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
+
     
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
