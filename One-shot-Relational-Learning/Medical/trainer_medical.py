@@ -220,99 +220,99 @@ class Trainer(object):
         return (left_connections, left_degrees, right_connections, right_degrees)
 
     def train(self):
-    logging.info('START TRAINING...')
-    best_hits10 = 0.0
-    losses = deque([], self.log_every)
-    margins = deque([], self.log_every)
-
-    rel_weight_map = {
-        'positivelyRegulatesGO': 15.0, 
-        'negativelyRegulatesGO': 15.0, 
-        'regulatesGO': 10.0, 
-        'hasGeneticInteractionWith': 5.0,
-        'hasGeneExpressionOA': 1.0, 
-        'isAssociatedWithGO': 1.0
-    }
+        logging.info('START TRAINING...')
+        best_hits10 = 0.0
+        losses = deque([], self.log_every)
+        margins = deque([], self.log_every)
     
-    weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
-    for rel_name, weight in rel_weight_map.items():
-        esc_name = self.escape_token(rel_name)
-        if esc_name in self.symbol2id:
-            rel_idx = self.symbol2id[esc_name]
-            weight_tensor[rel_idx] = weight
-            logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
-
-    from data_loader import train_generate_medical 
-    entity_vecs = torch.tensor(np.loadtxt(self.dataset + '/entity2vec.ComplEx'), dtype=torch.float32)
-    entity_vecs = F.normalize(entity_vecs, p=2, dim=1).to(self.device)
-
-    for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
-        if len(data) != 10:
-            raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10. Check data_loader.py yield statement.")
-
-        support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
-
-        support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
-        query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(q_l, q_r))
-        false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(f_l, f_r))
-
-        support = torch.LongTensor(support_p).to(self.device, non_blocking=True)
-        query   = torch.LongTensor(query_p).to(self.device, non_blocking=True)
-
-        # Path C: Filter false candidates using FastText similarity
-        filtered_false = []
-        for i, f_idx in enumerate(false_p):
-            sim = F.cosine_similarity(entity_vecs[query_p[i][0]], entity_vecs[f_idx[1]], dim=0)
-            if sim < 0.8:  
-                filtered_false.append(f_idx)
-        if not filtered_false:
-            filtered_false = false_p
-        false = torch.LongTensor(filtered_false).to(self.device, non_blocking=True)
-
-        esc_rel_name = self.escape_token(rel_name)
-        rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
-        task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
-
-        if self.no_meta:
-            query_scores = self.matcher(query, support)
-            false_scores = self.matcher(false, support)
-        else:
-            false_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta([b[0] for b in filtered_false], [b[1] for b in filtered_false]))
-            query_scores = self.matcher(query, support, query_meta, support_meta)
-            false_scores = self.matcher(false, support, false_meta, support_meta)
-
-        adv_temperature = 0.5 
-        f_scores = false_scores.view(len(query), -1)
-        with torch.no_grad():
-            adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
-        adversarial_false = (adv_weights * f_scores).sum(dim=-1)
-        loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
+        rel_weight_map = {
+            'positivelyRegulatesGO': 15.0, 
+            'negativelyRegulatesGO': 15.0, 
+            'regulatesGO': 10.0, 
+            'hasGeneticInteractionWith': 5.0,
+            'hasGeneExpressionOA': 1.0, 
+            'isAssociatedWithGO': 1.0
+        }
         
-        losses.append(loss.item())
-        self.optim.zero_grad()
-        loss.backward()
-        self.optim.step()
-
-        if self.batch_nums % self.log_every == 0:
-            avg_loss = np.mean(losses)
-            logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Task: {rel_name}, Weight: {task_weight:.1f})")
-
-        if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
-            hits10, hits5, mrr, _ = self.eval(meta=self.meta)
-            self.save()
-            if hits10 > best_hits10:
-                self.save(self.save_path + '_bestHits10')
-                best_hits10 = hits10
-
-        self.batch_nums += 1
-        self.scheduler.step()
-
-        if self.batch_nums >= self.max_batches:
-            logging.critical(f"Max batches ({self.max_batches}) reached. Final Eval Starting.")
-            hits10, hits5, mrr, _ = self.eval(meta=self.meta)
-            logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
-            self.save()
-            break
+        weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
+        for rel_name, weight in rel_weight_map.items():
+            esc_name = self.escape_token(rel_name)
+            if esc_name in self.symbol2id:
+                rel_idx = self.symbol2id[esc_name]
+                weight_tensor[rel_idx] = weight
+                logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
+    
+        from data_loader import train_generate_medical 
+        entity_vecs = torch.tensor(np.loadtxt(self.dataset + '/entity2vec.ComplEx'), dtype=torch.float32)
+        entity_vecs = F.normalize(entity_vecs, p=2, dim=1).to(self.device)
+    
+        for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+            if len(data) != 10:
+                raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10. Check data_loader.py yield statement.")
+    
+            support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
+    
+            support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
+            query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(q_l, q_r))
+            false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(f_l, f_r))
+    
+            support = torch.LongTensor(support_p).to(self.device, non_blocking=True)
+            query   = torch.LongTensor(query_p).to(self.device, non_blocking=True)
+    
+            # Path C: Filter false candidates using FastText similarity
+            filtered_false = []
+            for i, f_idx in enumerate(false_p):
+                sim = F.cosine_similarity(entity_vecs[query_p[i][0]], entity_vecs[f_idx[1]], dim=0)
+                if sim < 0.8:  
+                    filtered_false.append(f_idx)
+            if not filtered_false:
+                filtered_false = false_p
+            false = torch.LongTensor(filtered_false).to(self.device, non_blocking=True)
+    
+            esc_rel_name = self.escape_token(rel_name)
+            rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
+            task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
+    
+            if self.no_meta:
+                query_scores = self.matcher(query, support)
+                false_scores = self.matcher(false, support)
+            else:
+                false_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta([b[0] for b in filtered_false], [b[1] for b in filtered_false]))
+                query_scores = self.matcher(query, support, query_meta, support_meta)
+                false_scores = self.matcher(false, support, false_meta, support_meta)
+    
+            adv_temperature = 0.5 
+            f_scores = false_scores.view(len(query), -1)
+            with torch.no_grad():
+                adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
+            adversarial_false = (adv_weights * f_scores).sum(dim=-1)
+            loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
+            
+            losses.append(loss.item())
+            self.optim.zero_grad()
+            loss.backward()
+            self.optim.step()
+    
+            if self.batch_nums % self.log_every == 0:
+                avg_loss = np.mean(losses)
+                logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Task: {rel_name}, Weight: {task_weight:.1f})")
+    
+            if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
+                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                self.save()
+                if hits10 > best_hits10:
+                    self.save(self.save_path + '_bestHits10')
+                    best_hits10 = hits10
+    
+            self.batch_nums += 1
+            self.scheduler.step()
+    
+            if self.batch_nums >= self.max_batches:
+                logging.critical(f"Max batches ({self.max_batches}) reached. Final Eval Starting.")
+                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
+                self.save()
+                break
 
                 
     # --- SAVE / LOAD ---
