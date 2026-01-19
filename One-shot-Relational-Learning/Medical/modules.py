@@ -180,7 +180,6 @@ class ContextAwareEncoder(nn.Module):
 
 
 class QueryEncoder(nn.Module):
-    """Query refinement via LSTM + attention over support set"""
     def __init__(self, input_dim, process_step=4):
         super().__init__()
         self.input_dim = input_dim
@@ -191,11 +190,14 @@ class QueryEncoder(nn.Module):
         if self.process_step == 0:
             return query
         batch_size = query.size(0)
-        h_r = Variable(torch.zeros(batch_size, 2 * self.input_dim)).cuda()
-        c = Variable(torch.zeros(batch_size, 2 * self.input_dim)).cuda()
+        # FIXED: Removed .cuda() and used .to(query.device) for portability
+        h_r = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
+        c = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
+        
         for _ in range(self.process_step):
             h_r_, c = self.process(query, (h_r, c))
             h = query + h_r_[:, :self.input_dim]
+            # Refine query representation based on support set
             attn = F.softmax(torch.matmul(h, support.t()), dim=1)
             r = torch.matmul(attn, support)
             h_r = torch.cat((h, r), dim=1)
