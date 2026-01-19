@@ -284,25 +284,28 @@ class Trainer(object):
             adv_temperature = 0.5 
             f_scores = []
             start_idx = 0
-            for q_idx in range(query_scores.size(0)):
-                # Number of negatives for this query
-                n_neg = query[q_idx].size(0) if query.ndim > 1 else len(false[q_idx]) if hasattr(false[q_idx], '__len__') else 1
-                end_idx = start_idx + n_neg
-                f_scores.append(false_scores[start_idx:end_idx])
-                start_idx = end_idx
             
+            for q_idx in range(query_scores.size(0)):
+                # Compute number of negatives for this query
+                n_neg = len(false[q_idx]) if hasattr(false[q_idx], '__len__') else 1
+                end_idx = start_idx + n_neg
+                fs = false_scores[start_idx:end_idx]
+                start_idx = end_idx
+                f_scores.append(fs)
+            
+            # Compute adversarial false scores safely
             adv_false_scores = torch.stack([
                 (F.softmax(fs * adv_temperature, dim=-1) * fs).sum()
-                if fs.numel() > 1 else fs[0]
+                if fs.numel() > 0 else torch.tensor(0.0, device=self.device)
                 for fs in f_scores
             ])
             
             loss = (F.relu(self.margin - (query_scores - adv_false_scores)) * task_weight).mean()
-            
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
+
 
     
             if self.batch_nums % self.log_every == 0:
