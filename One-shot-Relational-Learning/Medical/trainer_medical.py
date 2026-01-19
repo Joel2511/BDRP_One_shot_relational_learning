@@ -282,7 +282,7 @@ class Trainer(object):
                 false_scores = self.matcher(false, support, false_meta, support_meta)
     
             adv_temperature = 0.5 
-            f_scores = false_scores.view(len(query), -1)
+            f_scores = false_scores.view(query_scores.size(0), -1) if false_scores.numel() > 1 else false_scores.unsqueeze(1)
             with torch.no_grad():
                 adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
             adversarial_false = (adv_weights * f_scores).sum(dim=-1)
