@@ -109,59 +109,49 @@ class EmbedMatcher(nn.Module):
         return final
 
     def forward(self, query, support, query_meta=None, support_meta=None):
-        """
-        query: (batch_size, 2) -> [head, tail]
-        support: (few, 2) -> [head, tail]
-        """
-        if query_meta is None or support_meta is None:
-            # Fallback for non-graph runs
-            q_emb = self.symbol_emb(query).view(query.size(0), -1)
-            s_emb = self.symbol_emb(support).view(support.size(0), -1)
-            s_mean = s_emb.mean(dim=0, keepdim=True)
-            return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
-
-        # Handle metadata unpacking (supports 6-tuple or 4-tuple)
-        if len(query_meta) == 6:
-            q_l_conn, _, q_l_deg, q_r_conn, _, q_r_deg = query_meta
-            s_l_conn, _, s_l_deg, s_r_conn, _, s_r_deg = support_meta
-        else:
-            q_l_conn, q_l_deg, q_r_conn, q_r_deg = query_meta
-            s_l_conn, s_l_deg, s_r_conn, s_r_deg = support_meta
-
-        # Extract IDs for k-NN enrichment
-        q_h_ids, q_t_ids = query[:, 0], query[:, 1]
-        s_h_ids, s_t_ids = support[:, 0], support[:, 1]
-
-        # Process Left (Head) and Right (Tail) Contexts
-        query_left = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids)
-        query_right = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids)
-        support_left = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids)
-        support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids)
-
-        # Combine head and tail representations
-        query_neighbor = torch.cat((query_left, query_right), dim=-1)
-        support_neighbor = torch.cat((support_left, support_right), dim=-1)
-
-        # Matching Network (G-Matching Logic)
-        support_g = self.support_encoder(support_neighbor.unsqueeze(0))
-        support_g = torch.mean(support_g, dim=1) # Aggregate support set
-        
-        query_g = self.support_encoder(query_neighbor.unsqueeze(1))
-        query_g = query_g.squeeze(1)
-        
-        # Query Encoding (Refining query relative to support)
-        # query_f = self.query_encoder(support_g, query_g)
-        
-        # # Dot product for final matching score
-        # matching_scores = torch.matmul(query_f, support_g.squeeze(0).t()).squeeze(-1)
-        # return matching_scores
-        # Replace the final matching score block with this:
-        query_f = F.normalize(query_f, p=2, dim=-1)
-        support_g = F.normalize(support_g, p=2, dim=-1)
-        
-        # matching_scores is now strictly Cosine Similarity [-1, 1]
-        matching_scores = torch.matmul(query_f, support_g.squeeze(0).t()).squeeze(-1)
-        return matching_scores
+            if query_meta is None or support_meta is None:
+                q_emb = self.symbol_emb(query).view(query.size(0), -1)
+                s_emb = self.symbol_emb(support).view(support.size(0), -1)
+                s_mean = s_emb.mean(dim=0, keepdim=True)
+                return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
+    
+            if len(query_meta) == 6:
+                q_l_conn, _, q_l_deg, q_r_conn, _, q_r_deg = query_meta
+                s_l_conn, _, s_l_deg, s_r_conn, _, s_r_deg = support_meta
+            else:
+                q_l_conn, q_l_deg, q_r_conn, q_r_deg = query_meta
+                s_l_conn, s_l_deg, s_r_conn, s_r_deg = support_meta
+    
+            q_h_ids, q_t_ids = query[:, 0], query[:, 1]
+            s_h_ids, s_t_ids = support[:, 0], support[:, 1]
+    
+            query_left = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids)
+            query_right = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids)
+            support_left = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids)
+            support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids)
+    
+            query_neighbor = torch.cat((query_left, query_right), dim=-1)
+            support_neighbor = torch.cat((support_left, support_right), dim=-1)
+    
+            # Support aggregate
+            support_g = self.support_encoder(support_neighbor.unsqueeze(0))
+            support_g = torch.mean(support_g, dim=1) 
+            
+            # Query refinement
+            query_g = self.support_encoder(query_neighbor.unsqueeze(1))
+            query_g = query_g.squeeze(1)
+            
+            # FIXED: Uncommented and used the refinement step
+            query_f = self.query_encoder(support_g.squeeze(0), query_g)
+            
+            # --- SOTA NORMALIZATION FIX ---
+            # Research Fact: Normalizing to unit sphere ensures gradients are based on biological angle
+            query_f = F.normalize(query_f, p=2, dim=-1)
+            support_g = F.normalize(support_g.squeeze(0), p=2, dim=-1)
+            
+            # Final Cosine Matching Score
+            matching_scores = torch.matmul(query_f, support_g.t()).squeeze(-1)
+            return matching_scores
 
     def load_knn_index(self, knn_path):
         """Safe load of precomputed FAISS indices"""
