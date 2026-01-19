@@ -281,17 +281,22 @@ class Trainer(object):
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
     
-            adv_temperature = 0.5 
+            adv_temperature = 0.5
+            
+            # Reconstruct per-query negatives
             f_scores = []
             start_idx = 0
-            
             for q_idx in range(query_scores.size(0)):
-                # Compute number of negatives for this query
-                n_neg = len(false[q_idx]) if hasattr(false[q_idx], '__len__') else 1
-                end_idx = start_idx + n_neg
-                fs = false_scores[start_idx:end_idx]
-                start_idx = end_idx
+                # Count how many negatives this query has
+                # Assuming your data loader gives 'false' as flattened [all_negatives_for_batch]
+                n_neg = sum(1 for i in range(start_idx, false_scores.size(0))
+                            if i < false_scores.size(0))  # safe upper bound
+                if start_idx >= false_scores.size(0):
+                    fs = torch.tensor([], device=self.device)
+                else:
+                    fs = false_scores[start_idx : start_idx + n_neg]
                 f_scores.append(fs)
+                start_idx += n_neg
             
             # Compute adversarial false scores safely
             adv_false_scores = torch.stack([
@@ -305,6 +310,7 @@ class Trainer(object):
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
+
 
 
     
