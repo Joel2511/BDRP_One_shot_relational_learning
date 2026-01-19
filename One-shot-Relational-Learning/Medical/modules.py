@@ -187,21 +187,30 @@ class QueryEncoder(nn.Module):
         self.process = nn.LSTMCell(input_dim, 2 * input_dim)
 
     def forward(self, support, query):
-        if self.process_step == 0:
-            return query
-        batch_size = query.size(0)
-        # FIXED: Removed .cuda() and used .to(query.device) for portability
-        h_r = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
-        c = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
-        
-        for _ in range(self.process_step):
-            h_r_, c = self.process(query, (h_r, c))
-            h = query + h_r_[:, :self.input_dim]
-            # Refine query representation based on support set
-            attn = F.softmax(torch.matmul(h, support.t()), dim=1)
-            r = torch.matmul(attn, support)
-            h_r = torch.cat((h, r), dim=1)
-        return h
+            if self.process_step == 0:
+                return query
+            batch_size = query.size(0)
+            
+            # Ensure support is 2D [1, input_dim] even in one-shot
+            if support.dim() == 1:
+                support = support.unsqueeze(0)
+                
+            h_r = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
+            c = torch.zeros(batch_size, 2 * self.input_dim).to(query.device)
+            
+            for _ in range(self.process_step):
+                h_r_, c = self.process(query, (h_r, c))
+                h = query + h_r_[:, :self.input_dim]
+                
+                # --- DIMENSION FIX ---
+                # Matmul [B, D] x [D, 1] -> [B, 1]
+                scores = torch.matmul(h, support.t())
+                attn = F.softmax(scores, dim=1) 
+                
+                # r: [B, D]
+                r = torch.matmul(attn, support)
+                h_r = torch.cat((h, r), dim=1)
+            return h
 
 
 if __name__ == '__main__':
