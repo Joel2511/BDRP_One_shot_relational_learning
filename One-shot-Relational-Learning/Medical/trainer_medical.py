@@ -275,26 +275,20 @@ class Trainer(object):
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
 
-            margin_ = query_scores - false_scores
-            margins.append(margin_.mean().item())
-            
-            # Weighted Loss
-            # loss = (F.relu(self.margin - margin_) * task_weight).mean()
-            # --- CORRECTED SELF-ADVERSARIAL LOSS ---
+            # --- SOTA ADVERSARIAL LOSS IMPLEMENTATION ---
             adv_temperature = 0.5 
             
-            # Reshape false_scores to [batch, negs] if not already
-            # Assuming batch_size=128, neg_num=50
-            f_scores = false_scores.view(self.batch_size, -1) 
+            # Reshape false_scores to [Batch, Neg_Num] (128, 50)
+            f_scores = false_scores.view(self.batch_size, -1)
             
             with torch.no_grad():
-                # Softmax across the negative samples for EACH query
+                # Focus gradient pressure on the hardest negatives
                 adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
             
-            # Weighted average of negative scores per query
+            # Weighted average of hard negative scores
             adversarial_false = (adv_weights * f_scores).sum(dim=-1)
             
-            # query_scores shape is [batch_size]
+            # Final Margin Loss: Normalized query score vs. Hardest Negative
             loss = (F.relu(self.margin - (query_scores - adversarial_false)) * task_weight).mean()
             
             losses.append(loss.item())
