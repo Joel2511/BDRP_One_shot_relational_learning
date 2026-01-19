@@ -337,37 +337,41 @@ class Trainer(object):
         self.matcher.eval()
         symbol2id = self.symbol2id
         few = self.few
-
+    
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Standard NELL filename
         test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
-
+    
+        # Per-relation tracking
+        relation_metrics = {}
+        semantic_relations = ["containedIn", "partOfPathway", "regulatesGO",
+                              "positivelyRegulatesGO", "negativelyRegulatesGO"]
+    
         EVAL_BATCH_SIZE = 1024 
-
+    
         for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates[query_]
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[self.escape_token(triple[0])],
                               symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
-
+    
             if meta:
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
                 support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
-
+    
             support = torch.LongTensor(support_pairs).to(self.device)
-
+    
             for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
                 h_esc = self.escape_token(triple[0])
                 r_esc = self.escape_token(triple[1])
                 h_sym = symbol2id[h_esc]
                 h_ent = self.ent2id[h_esc] if meta else None
-
+    
                 valid_candidate_data = [] 
                 for ent in candidates:
                     ent_esc = self.escape_token(ent)
@@ -378,7 +382,7 @@ class Trainer(object):
                     t_sym = symbol2id[ent_esc]
                     t_ent = self.ent2id[ent_esc] if meta else None
                     valid_candidate_data.append((h_sym, t_sym, h_ent, t_ent))
-
+    
                 true_esc = self.escape_token(true)
                 true_sym = symbol2id[true_esc]
                 true_ent = self.ent2id[true_esc] if meta else None
@@ -398,21 +402,18 @@ class Trainer(object):
                     else:
                         scores_t = self.matcher(query_batch, support)
                     
-                    # FIXED SCORES COLLECTION
                     if scores_t.dim() == 0:
                         all_scores.append(scores_t.item())
                     else:
                         all_scores.extend(scores_t.detach().cpu().numpy())
                 
-                # ENSURE NON-EMPTY
                 if not all_scores:
                     all_scores = [0.0]
                 
                 true_score = all_scores[-1] if all_scores else 0.0
                 all_scores_np = np.array(all_scores)
                 rank = np.sum(all_scores_np > true_score) + 1
-
-                
+    
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
@@ -421,17 +422,27 @@ class Trainer(object):
                 hits5_.append(1.0 if rank <= 5 else 0.0)
                 hits1_.append(1.0 if rank <= 1 else 0.0)
                 mrr_.append(1.0 / rank)
-
-            logging.critical('{} Hits10:{:.3f}, Hits5:{:.3f}, Hits1:{:.3f} MRR:{:.3f}'.format(
-                query_, np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), np.mean(mrr_)))
+    
+            # Save per-relation metrics
+            relation_metrics[query_] = {
+                "MRR": np.mean(mrr_),
+                "HITS@10": np.mean(hits10_),
+                "HITS@5": np.mean(hits5_),
+                "HITS@1": np.mean(hits1_)
+            }
+    
+            flag = "(Semantic)" if query_ in semantic_relations else ""
+            logging.critical('{} MRR:{:.3f}, H10:{:.3f}, H5:{:.3f}, H1:{:.3f} {}'.format(
+                query_, np.mean(mrr_), np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), flag))
             
-        logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
-        logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
-        logging.critical('HITS1: {:.3f}'.format(np.mean(hits1)))
-        logging.critical('MAP: {:.3f}'.format(np.mean(mrr)))
-
+        logging.critical('Overall HITS10: {:.3f}'.format(np.mean(hits10)))
+        logging.critical('Overall HITS5: {:.3f}'.format(np.mean(hits5)))
+        logging.critical('Overall HITS1: {:.3f}'.format(np.mean(hits1)))
+        logging.critical('Overall MRR: {:.3f}'.format(np.mean(mrr)))
+    
         self.matcher.train()
-        return np.mean(hits10), np.mean(hits5), np.mean(mrr)
+        return np.mean(hits10), np.mean(hits5), np.mean(mrr), relation_metrics
+
 
     def test_(self):
         self.load()
