@@ -252,13 +252,14 @@ class Trainer(object):
     
             support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
     
+            # --- FIXED METADATA SECTION ---
+            # We now use the original f_l and f_r provided by the data loader
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
             query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(q_l, q_r))
             false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(f_l, f_r))
     
-            # --- THE FAIL-SAFE FIX ---
-            # This replaces all previous filtering/assignment logic for support, query, and false
-            # It ensures every ID is within the valid embedding range [0, pad_id]
+            # --- THE FAIL-SAFE TENSOR SECTION ---
+            # This ensures every ID is within the valid embedding range [0, pad_id]
             support = torch.clamp(torch.LongTensor(support_p).to(self.device), 0, self.pad_id)
             query   = torch.clamp(torch.LongTensor(query_p).to(self.device), 0, self.pad_id)
             false   = torch.clamp(torch.LongTensor(false_p).to(self.device), 0, self.pad_id)
