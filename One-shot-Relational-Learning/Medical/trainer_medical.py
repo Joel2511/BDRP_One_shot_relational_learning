@@ -262,16 +262,31 @@ class Trainer(object):
             # Path C: Filter false candidates using FastText similarity
             filtered_false = []
             for i, f_idx in enumerate(false_p):
-                sim = F.cosine_similarity(entity_vecs[query_p[i][0]], entity_vecs[f_idx[1]], dim=0)
-                if sim < 0.8:  
+                h_sym = query_p[i][0]
+                t_sym = f_idx[1]
+            
+                if h_sym not in self.id2ent or t_sym not in self.id2ent:
+                    continue
+            
+                h_ent = self.ent2id[self.id2ent[h_sym]]
+                t_ent = self.ent2id[self.id2ent[t_sym]]
+            
+                if h_ent >= entity_vecs.size(0) or t_ent >= entity_vecs.size(0):
+                    continue
+            
+                sim = F.cosine_similarity(entity_vecs[h_ent], entity_vecs[t_ent], dim=0)
+                if sim < 0.8:
                     filtered_false.append(f_idx)
+            
             if not filtered_false:
                 filtered_false = false_p
+            
             false = torch.LongTensor(filtered_false).to(self.device, non_blocking=True)
-    
+            
             esc_rel_name = self.escape_token(rel_name)
             rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
             task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
+
     
             if self.no_meta:
                 query_scores = self.matcher(query, support)
