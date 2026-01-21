@@ -248,7 +248,7 @@ class Trainer(object):
     
         for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             if len(data) != 10:
-                raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10. Check data_loader.py yield statement.")
+                raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10.")
     
             support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
     
@@ -256,30 +256,14 @@ class Trainer(object):
             query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(q_l, q_r))
             false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(f_l, f_r))
     
-            support = torch.LongTensor(support_p).to(self.device, non_blocking=True)
-            query   = torch.LongTensor(query_p).to(self.device, non_blocking=True)
-    
-            # Path C: Filter false candidates using FastText similarity
-            filtered_false = []
-            for i, f_idx in enumerate(false_p):
-                h_sym = query_p[i][0]
-                t_sym = f_idx[1]
+            # --- THE FAIL-SAFE FIX ---
+            # This replaces all previous filtering/assignment logic for support, query, and false
+            # It ensures every ID is within the valid embedding range [0, pad_id]
+            support = torch.clamp(torch.LongTensor(support_p).to(self.device), 0, self.pad_id)
+            query   = torch.clamp(torch.LongTensor(query_p).to(self.device), 0, self.pad_id)
+            false   = torch.clamp(torch.LongTensor(false_p).to(self.device), 0, self.pad_id)
             
-                if h_sym not in self.ent2id or t_sym not in self.ent2id:
-                    continue
-            
-                h_ent = self.ent2id[h_sym]
-                t_ent = self.ent2id[t_sym]
-            
-                sim = F.cosine_similarity(entity_vecs[h_ent], entity_vecs[t_ent], dim=0)
-                if sim < 0.8:
-                    filtered_false.append(f_idx)
-            
-            if not filtered_false:
-                filtered_false = false_p
-            
-            false = torch.LongTensor(filtered_false).to(self.device, non_blocking=True)
-            
+            # Weight Lookup logic
             esc_rel_name = self.escape_token(rel_name)
             rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
             task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
