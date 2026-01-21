@@ -243,81 +243,53 @@ class Trainer(object):
                 logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
     
         from data_loader import train_generate_medical 
-        entity_vecs = torch.tensor(np.loadtxt(self.dataset + '/entity2vec.ComplEx'), dtype=torch.float32)
-        entity_vecs = F.normalize(entity_vecs, p=2, dim=1).to(self.device)
-    
+        
         for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
             if len(data) != 10:
                 raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10.")
     
             support_p, query_p, false_p, s_l, s_r, q_l, q_r, f_l, f_r, rel_name = data
     
-            # --- FIXED METADATA SECTION ---
-            # We now use the original f_l and f_r provided by the data loader
             support_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(s_l, s_r))
             query_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(q_l, q_r))
             false_meta   = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta(f_l, f_r))
     
-            # --- THE FAIL-SAFE TENSOR SECTION ---
-            # This ensures every ID is within the valid embedding range [0, pad_id]
             support = torch.clamp(torch.LongTensor(support_p).to(self.device), 0, self.pad_id)
             query   = torch.clamp(torch.LongTensor(query_p).to(self.device), 0, self.pad_id)
             false   = torch.clamp(torch.LongTensor(false_p).to(self.device), 0, self.pad_id)
             
-            # Weight Lookup logic
             esc_rel_name = self.escape_token(rel_name)
             rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
             task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
-
-
     
             if self.no_meta:
                 query_scores = self.matcher(query, support)
                 false_scores = self.matcher(false, support)
             else:
-                false_meta = tuple(t.to(self.device, non_blocking=True) for t in self.get_meta([b[0] for b in filtered_false], [b[1] for b in filtered_false]))
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
     
             adv_temperature = 0.5
+            neg_num = false_scores.size(0) // query_scores.size(0)
+            f_scores = false_scores.view(query_scores.size(0), neg_num)
             
-            # Reconstruct per-query negatives
-            f_scores = []
-            start_idx = 0
-            for q_idx in range(query_scores.size(0)):
-                # Count how many negatives this query has
-                # Assuming your data loader gives 'false' as flattened [all_negatives_for_batch]
-                n_neg = sum(1 for i in range(start_idx, false_scores.size(0))
-                            if i < false_scores.size(0))  # safe upper bound
-                if start_idx >= false_scores.size(0):
-                    fs = torch.tensor([], device=self.device)
-                else:
-                    fs = false_scores[start_idx : start_idx + n_neg]
-                f_scores.append(fs)
-                start_idx += n_neg
+            with torch.no_grad():
+                adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
             
-            # Compute adversarial false scores safely
-            adv_false_scores = torch.stack([
-                (F.softmax(fs * adv_temperature, dim=-1) * fs).sum()
-                if fs.numel() > 0 else torch.tensor(0.0, device=self.device)
-                for fs in f_scores
-            ])
+            adv_false_scores = (adv_weights * f_scores).sum(dim=-1)
             
             loss = (F.relu(self.margin - (query_scores - adv_false_scores)) * task_weight).mean()
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
-
-
-
     
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
                 logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Task: {rel_name}, Weight: {task_weight:.1f})")
     
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
-                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                hits10, hits5, mrr = self.eval(meta=self.meta)
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
@@ -328,7 +300,7 @@ class Trainer(object):
     
             if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Final Eval Starting.")
-                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                hits10, hits5, mrr = self.eval(meta=self.meta)
                 logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
                 self.save()
                 break
