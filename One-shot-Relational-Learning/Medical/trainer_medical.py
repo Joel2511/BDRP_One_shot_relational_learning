@@ -265,14 +265,11 @@ class Trainer(object):
                 h_sym = query_p[i][0]
                 t_sym = f_idx[1]
             
-                if h_sym not in self.id2ent or t_sym not in self.id2ent:
+                if h_sym not in self.ent2id or t_sym not in self.ent2id:
                     continue
             
-                h_ent = self.ent2id[self.id2ent[h_sym]]
-                t_ent = self.ent2id[self.id2ent[t_sym]]
-            
-                if h_ent >= entity_vecs.size(0) or t_ent >= entity_vecs.size(0):
-                    continue
+                h_ent = self.ent2id[h_sym]
+                t_ent = self.ent2id[t_sym]
             
                 sim = F.cosine_similarity(entity_vecs[h_ent], entity_vecs[t_ent], dim=0)
                 if sim < 0.8:
@@ -286,6 +283,7 @@ class Trainer(object):
             esc_rel_name = self.escape_token(rel_name)
             rel_id = self.symbol2id.get(esc_rel_name, self.pad_id)
             task_weight = weight_tensor[rel_id] if rel_id < len(weight_tensor) else 1.0
+
 
     
             if self.no_meta:
