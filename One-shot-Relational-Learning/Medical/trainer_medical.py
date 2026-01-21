@@ -289,7 +289,7 @@ class Trainer(object):
                 logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Task: {rel_name}, Weight: {task_weight:.1f})")
     
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
-                hits10, hits5, mrr = self.eval(meta=self.meta)
+                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
@@ -300,7 +300,7 @@ class Trainer(object):
     
             if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Final Eval Starting.")
-                hits10, hits5, mrr = self.eval(meta=self.meta)
+                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
                 logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
                 self.save()
                 break
