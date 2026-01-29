@@ -18,7 +18,7 @@ from tensorboardX import SummaryWriter
 class Trainer(object):
     
    def __init__(self, arg):
-        super(Trainer, self).__init__()
+       super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
         if not torch.cuda.is_available():
@@ -93,17 +93,17 @@ class Trainer(object):
         print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
     def load_tasks(self, file_path):
-            """Groups JSONL triples by relation for evaluation compatibility."""
-            if file_path.endswith('.json'):
-                return json.load(open(file_path))
-            
-            tasks = defaultdict(list)
-            with open(file_path, 'r') as f:
-                for line in f:
-                    data = json.loads(line)
-                    # Grouping by relation to match query-based evaluation logic
-                    tasks[data['relation']].append([data['query_enc'][0], data['relation'], data['query_enc'][1]])
-            return tasks
+        if file_path.endswith('.json'):
+            return json.load(open(file_path))
+
+        tasks = defaultdict(list)
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                tasks[data['relation']].append(
+                    [data['query_enc'][0], data['relation'], data['query_enc'][1]]
+                )
+        return tasks
 
     def load_symbol2id(self):
         symbol_id = {}
