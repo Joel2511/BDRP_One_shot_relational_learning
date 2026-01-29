@@ -30,13 +30,13 @@ def read_options():
     # --- NEW HYPERPARAMETERS FOR GATING/DISTANCE ---
     parser.add_argument("--k_neighbors", default=10, type=int, 
                         help="Number of closest neighbors to keep (for Distance Filtering).")
-    #parser.add_argument("--gate_temp", default=1.0, type=float,
-                        #help="Temperature parameter for soft sigmoid gating.")
     parser.add_argument('--knn_k', type=int, default=32, help='k-NN neighbors')
     parser.add_argument('--knn_alpha', type=float, default=0.5, help='self+knn interp')
     parser.add_argument('--use_fasttext', action='store_true', help='Use FastText semantic anchors')
 
-    
+    # --- DATASET FILTERING ---
+    parser.add_argument('--object_only', action='store_true', help='Use filtered Object-Property only data')
+
     args = parser.parse_args()
     args.save_path = 'models/' + args.prefix
 
