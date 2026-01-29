@@ -17,11 +17,10 @@ from tensorboardX import SummaryWriter
 
 class Trainer(object):
     
-    def __init__(self, arg):
+   def __init__(self, arg):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
-        # Force GPU usage
         if not torch.cuda.is_available():
             self.device = torch.device("cpu")
             logging.warning("No CUDA found. Running on CPU.")
@@ -43,7 +42,6 @@ class Trainer(object):
         self.num_symbols = len(self.symbol2id.keys()) - 1
         self.pad_id = self.num_symbols
 
-        # Matcher setup
         self.matcher = EmbedMatcher(
             self.embed_dim,
             self.num_symbols,
@@ -54,8 +52,8 @@ class Trainer(object):
             process_steps=self.process_steps,
             finetune=self.fine_tune,
             aggregate=self.aggregate,
-            knn_k=args.knn_k,
-            knn_alpha=args.knn_alpha
+            knn_k=self.knn_k,
+            knn_alpha=self.knn_alpha
         )
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
@@ -78,12 +76,34 @@ class Trainer(object):
         self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json')) 
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
-        # Move large static tensors to GPU
+        # Set specific filenames for filtered data
+        if self.object_only:
+            self.train_file = 'medical_object_only.train.jsonl'
+            self.val_file = 'medical_object_only.validation.jsonl'
+            self.test_file = 'medical_object_only.test.jsonl'
+        else:
+            self.train_file = 'medical_cleaned.train.jsonl'
+            self.val_file = 'validation_tasks.json'
+            self.test_file = 'test_tasks.json'
+
         self.connections = torch.LongTensor(self.connections).to(self.device)
         e1_degrees_list = [float(self.e1_degrees.get(i, 0)) for i in range(self.num_ents)]
         self.e1_degrees_tensor = torch.FloatTensor(e1_degrees_list).to(self.device)
 
         print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
+
+    def load_tasks(self, file_path):
+        """Groups JSONL triples by relation for evaluation compatibility."""
+        if file_path.endswith('.json'):
+            return json.load(open(file_path))
+        
+        tasks = defaultdict(list)
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                # Grouping by relation to match query-based evaluation logic
+                tasks[data['relation']].append([data['query_enc'][0], data['relation'], data['query_enc'][1]])
+        return tasks
 
     def load_symbol2id(self):
         symbol_id = {}
@@ -223,8 +243,7 @@ class Trainer(object):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
         losses = deque([], self.log_every)
-        margins = deque([], self.log_every)
-    
+        
         rel_weight_map = {
             'positivelyRegulatesGO': 15.0, 
             'negativelyRegulatesGO': 15.0, 
@@ -241,10 +260,11 @@ class Trainer(object):
                 rel_idx = self.symbol2id[esc_name]
                 weight_tensor[rel_idx] = weight
                 logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
-    
+        
         from data_loader import train_generate_medical 
         
-        for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2):
+        # Pass the specific train_file (Object-Only or Full)
+        for data in train_generate_medical(self.dataset, self.batch_size, self.train_few, self.symbol2id, self.ent2id, self.e1rel_e2, train_file=self.train_file):
             if len(data) != 10:
                 raise ValueError(f"CRITICAL ERROR: Data loader yielded {len(data)} items instead of 10.")
     
@@ -289,7 +309,7 @@ class Trainer(object):
                 logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f} (Task: {rel_name}, Weight: {task_weight:.1f})")
     
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
-                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                hits10, hits5, mrr, _ = self.eval(mode='dev', meta=self.meta)
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
@@ -300,11 +320,10 @@ class Trainer(object):
     
             if self.batch_nums >= self.max_batches:
                 logging.critical(f"Max batches ({self.max_batches}) reached. Final Eval Starting.")
-                hits10, hits5, mrr, _ = self.eval(meta=self.meta)
+                hits10, hits5, mrr, _ = self.eval(mode='dev', meta=self.meta)
                 logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
                 self.save()
                 break
-
                 
     # --- SAVE / LOAD ---
     def save(self, path="models/initial"):
@@ -328,11 +347,13 @@ class Trainer(object):
         few = self.few
     
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        test_tasks = json.load(open(self.dataset + ('/validation_tasks.json' if mode == 'dev' else '/test_tasks.json')))
+        # Use helper to load either JSON or JSONL tasks
+        task_path = os.path.join(self.dataset, self.val_file if mode == 'dev' else self.test_file)
+        test_tasks = self.load_tasks(task_path)
+        
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
     
-        # Per-relation tracking
         relation_metrics = {}
         semantic_relations = ["containedIn", "partOfPathway", "regulatesGO",
                               "positivelyRegulatesGO", "negativelyRegulatesGO"]
@@ -341,7 +362,10 @@ class Trainer(object):
     
         for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
-            candidates = rel2candidates[query_]
+            candidates = rel2candidates.get(query_, [])
+            if not candidates:
+                continue
+
             support_triples = test_tasks[query_][:few]
             support_pairs = [[symbol2id[self.escape_token(triple[0])],
                               symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
@@ -399,7 +423,7 @@ class Trainer(object):
                 if not all_scores:
                     all_scores = [0.0]
                 
-                true_score = all_scores[-1] if all_scores else 0.0
+                true_score = all_scores[-1]
                 all_scores_np = np.array(all_scores)
                 rank = np.sum(all_scores_np > true_score) + 1
     
@@ -412,12 +436,11 @@ class Trainer(object):
                 hits1_.append(1.0 if rank <= 1 else 0.0)
                 mrr_.append(1.0 / rank)
     
-            # Save per-relation metrics
             relation_metrics[query_] = {
-                "MRR": np.mean(mrr_),
-                "HITS@10": np.mean(hits10_),
-                "HITS@5": np.mean(hits5_),
-                "HITS@1": np.mean(hits1_)
+                "MRR": np.mean(mrr_) if mrr_ else 0,
+                "HITS@10": np.mean(hits10_) if hits10_ else 0,
+                "HITS@5": np.mean(hits5_) if hits5_ else 0,
+                "HITS@1": np.mean(hits1_) if hits1_ else 0
             }
     
             flag = "(Semantic)" if query_ in semantic_relations else ""
