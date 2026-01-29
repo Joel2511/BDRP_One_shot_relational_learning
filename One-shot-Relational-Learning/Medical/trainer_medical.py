@@ -138,18 +138,14 @@ class Trainer(object):
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
-        
         if self.embed_model == 'ComplEx':
             try:
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
-                logging.info("Loaded ComplEx as standard floats.")
             except ValueError:
-                logging.info("Standard load failed. Flattening complex strings...")
                 ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
                 rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
                 ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
@@ -158,35 +154,31 @@ class Trainer(object):
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
 
-        # 1. Standardize ComplEx (Mean=0, Std=1)
-        ent_mean = np.mean(ent_embed, axis=1, keepdims=True)
-        ent_std = np.std(ent_embed, axis=1, keepdims=True)
-        ent_embed = (ent_embed - ent_mean) / (ent_std + 1e-3)
-        
-        rel_mean = np.mean(rel_embed, axis=1, keepdims=True)
-        rel_std = np.std(rel_embed, axis=1, keepdims=True)
-        rel_embed = (rel_embed - rel_mean) / (rel_std + 1e-3)
+        # 1. Standardize Structural Channel (ComplEx)
+        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
+        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
 
-        # 2. Adds Scaled FastText anchors
+        # 2. Integrate Semantic Channel (FastText)
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
-                logging.info('APPLYING SCALED SEMANTIC ANCHORS')
+                logging.info('CONCATENATING SEMANTIC ANCHORS (100D + 100D)')
                 ft_anchors = np.load(ft_path)
                 
-                # Standardize FastText scale
+                # Standardize Semantic Channel independently
                 ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
                 
-                # --- NEW FIX: COMPRESS TO 100D ---
-                # If anchors are 200D and embeddings are 100D, we average pairs of columns
+                # Compress FastText to 100D if it is 200D to match structural width
                 if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
-                    logging.info('Compressing 200D FastText to 100D via pooling...')
                     ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
                 
-                # Combine: Structural (1.0) + Semantic (0.05 weighting)
-                # weight to 0.15 to prevent semantics from overpowering the 100D structure
-                ent_embed = ent_embed + (0.15 * ft_anchors)
-                logging.info('Semantic anchors integrated successfully.')
+                # --- CONCATENATION SHIFT ---
+                # Entities get [Struct ; Semantic] -> 200D
+                ent_embed = np.concatenate([ent_embed, ft_anchors], axis=1)
+                # Relations get zero-padding for the semantic half to maintain 200D shape
+                rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
+                rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
+                logging.info(f"Final Embedding Dimension: {ent_embed.shape[1]}")
             else:
                 logging.error(f"FastText file not found at {ft_path}")
 
@@ -205,10 +197,33 @@ class Trainer(object):
                 embeddings.append(list(ent_embed[ent2id[key],:]))
         
         symbol_id['PAD'] = i
-        embeddings.append(list(np.zeros((rel_embed.shape[1],))))
+        # PAD must match the new 200D width
+        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
-
+    
+            # Final symbol mapping
+            embeddings = []
+            i = 0
+            for key in rel2id.keys():
+                if key not in ['','OOV']:
+                    symbol_id[key] = i
+                    i += 1
+                    embeddings.append(list(rel_embed[rel2id[key],:]))
+            for key in ent2id.keys():
+                if key not in ['', 'OOV']:
+                    symbol_id[key] = i
+                    i += 1
+                    embeddings.append(list(ent_embed[ent2id[key],:]))
+            
+            symbol_id['PAD'] = i
+            # PAD must match the new 200D width
+            embeddings.append(list(np.zeros((ent_embed.shape[1],))))
+            self.symbol2id = symbol_id
+            self.symbol2vec = np.array(embeddings)
+        
+            
+      
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
         self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
