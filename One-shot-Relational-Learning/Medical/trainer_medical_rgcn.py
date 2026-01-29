@@ -12,7 +12,7 @@ import random
 
 from args import read_options
 from data_loader import *
-from matcher import * #mean + distance neighbor encoding 
+from matcher_rgcn import * #mean + distance neighbor encoding 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
@@ -137,11 +137,18 @@ class Trainer(object):
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
 
-        logging.info('LOADING PRE-TRAINED EMBEDDING')
+        logging.info(f'LOADING PRE-TRAINED {self.embed_model} EMBEDDING')
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
-        if self.embed_model == 'ComplEx':
+        # --- NEW RGCN COMPATIBLE LOADING ---
+        if self.embed_model == 'RGCN':
+            # RGCN is real-valued only. No splitting needed.
+            ent_embed = np.loadtxt(ent_file)
+            rel_embed = np.loadtxt(rel_file)
+            logging.info("Loaded RGCN as pure real-valued vectors.")
+        
+        elif self.embed_model == 'ComplEx':
             try:
                 ent_embed = np.loadtxt(ent_file)
                 rel_embed = np.loadtxt(rel_file)
@@ -154,37 +161,29 @@ class Trainer(object):
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
 
-        # 1. Standardize Structural Channel (ComplEx)
+        # Standardize structural channel
         ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
         rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
 
-        # 2. Integrate Semantic Channel (FastText)
+        # Weighted Concatenation (Same logic as before, but with RGCN)
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
-                logging.info('WEIGHTED CONCATENATION (Structural + 0.2*Semantic)')
                 ft_anchors = np.load(ft_path)
-                
-                # Standardize Semantic Channel independently
                 ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
                 
-                # Compress FastText to 100D if it is 200D
+                # Compress 200D FastText to 100D if needed
                 if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
                     ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
                 
-                # --- THE FIX: WEIGHTED CONCATENATION ---
-                # We scale the semantic channel by 0.2 so it doesn't overpower the graph
                 semantic_weight = 0.2
                 ent_embed = np.concatenate([ent_embed, semantic_weight * ft_anchors], axis=1)
                 
-                # Relations get zero-padding to match 200D
                 rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
-                logging.info(f"Final Weighted Embedding Dimension: {ent_embed.shape[1]}")
-            else:
-                logging.error(f"FastText file not found at {ft_path}")
+                logging.info(f"Final RGCN+FT Weighted Dim: {ent_embed.shape[1]}")
 
-        # Final symbol mapping (Cleaned and Deduplicated)
+        # Final symbol mapping (rest of your code stays the same)
         embeddings = []
         i = 0
         for key in rel2id.keys():
@@ -192,7 +191,6 @@ class Trainer(object):
                 symbol_id[key] = i
                 i += 1
                 embeddings.append(list(rel_embed[rel2id[key], :]))
-        
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
@@ -201,7 +199,6 @@ class Trainer(object):
         
         symbol_id['PAD'] = i
         embeddings.append(list(np.zeros((ent_embed.shape[1],))))
-        
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
       
