@@ -111,9 +111,21 @@ def train_generate(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2):
         yield support_pairs, query_pairs, false_pairs, support_left, support_right, query_left, query_right, false_left, false_right
 
 
-def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2):
-    logging.info('LOADING MEDICAL TRAINING DATA')
-    train_tasks = json.load(open(dataset + '/train_tasks.json'))
+def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, train_file='train_tasks.json'):
+    logging.info(f'LOADING MEDICAL TRAINING DATA FROM {train_file}')
+    
+    file_path = dataset + '/' + train_file
+    # New logic to handle the .jsonl format we created
+    if train_file.endswith('.jsonl'):
+        train_tasks = defaultdict(list)
+        with open(file_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                h, r, t = data['query_enc'][0], data['relation'], data['query_enc'][1]
+                train_tasks[r].append([h, r, t])
+    else:
+        train_tasks = json.load(open(file_path))
+
     rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
     task_pool = list(train_tasks.keys())
     num_tasks = len(task_pool)
@@ -130,19 +142,16 @@ def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2
         rel_idx += 1
         candidates = rel2candidates.get(query, [])
 
-        # Skip relations with too few candidates
         if len(candidates) <= 20:
             continue
 
         train_and_test = train_tasks[query]
         random.shuffle(train_and_test)
         
-        # Initialize all yield variables to empty lists to prevent NameError
         support_pairs, support_left, support_right = [], [], []
         query_pairs, query_left, query_right = [], [], []
         false_pairs, false_left, false_right = [], [], []
 
-        # 1. Prepare Support Set
         support_triples = train_and_test[:few]
         for triple in support_triples:
             h, t = escape_token(triple[0]), escape_token(triple[2])
@@ -150,7 +159,6 @@ def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2
             support_left.append(ent2id.get(h, 0))
             support_right.append(ent2id.get(t, 0))
 
-        # 2. Prepare Query Set
         all_test_triples = train_and_test[few:]
         if len(all_test_triples) == 0:
             continue
@@ -163,11 +171,9 @@ def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2
             query_left.append(ent2id.get(h, 0))
             query_right.append(ent2id.get(t, 0))
 
-            # 3. Generate Negative Samples (False Pairs)
             key = h + r
             while True:
                 noise = escape_token(random.choice(candidates))
-                # Constraint check: ensure noise isn't actually a valid tail
                 if key in e1rel_e2 and noise in e1rel_e2[key]:
                     continue
                 if noise == t:
@@ -178,10 +184,8 @@ def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2
             false_left.append(ent2id.get(h, 0))
             false_right.append(ent2id.get(noise, 0))
 
-        # Final check: only yield if we actually populated the lists
         if len(support_pairs) > 0 and len(query_pairs) > 0:
             yield support_pairs, query_pairs, false_pairs, support_left, support_right, query_left, query_right, false_left, false_right, query
-
 
 
 
