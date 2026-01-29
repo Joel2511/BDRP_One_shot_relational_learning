@@ -16,9 +16,8 @@ from matcher import * #mean + distance neighbor encoding
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
-    
-   def __init__(self, arg):
-       super(Trainer, self).__init__()
+    def __init__(self, arg):
+        super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
 
         if not torch.cuda.is_available():
@@ -92,6 +91,7 @@ class Trainer(object):
 
         print(f"Trainer initialized. Using device: {self.device}, GPU count: {torch.cuda.device_count()}")
 
+    
     def load_tasks(self, file_path):
         if file_path.endswith('.json'):
             return json.load(open(file_path))
