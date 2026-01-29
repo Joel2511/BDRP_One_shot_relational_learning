@@ -116,14 +116,24 @@ def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2
     logging.info(f'LOADING MEDICAL TRAINING DATA FROM {train_file}')
     
     file_path = dataset + '/' + train_file
-    # New logic to handle the .jsonl format we created
     if train_file.endswith('.jsonl'):
-        train_tasks = defaultdict(list)
-        with open(file_path, 'r') as f:
-            for line in f:
-                data = json.loads(line)
-                h, r, t = data['query_enc'][0], data['relation'], data['query_enc'][1]
-                train_tasks[r].append([h, r, t])
+            train_tasks = defaultdict(list)
+            with open(file_path, 'r') as f:
+                for line in f:
+                    data = json.loads(line)
+                    # Check for standard 'head', 'relation', 'tail' keys
+                    h = data.get('head') or data.get('h')
+                    r = data.get('relation') or data.get('r')
+                    t = data.get('tail') or data.get('t')
+                    
+                    # If keys are missing, try the 'query' or 'query_enc' fallback
+                    if not h:
+                        q = data.get('query') or data.get('query_enc')
+                        if q:
+                            h, t = q[0], q[1]
+                    
+                    if h and r and t:
+                        train_tasks[r].append([h, r, t])
     else:
         train_tasks = json.load(open(file_path))
 
