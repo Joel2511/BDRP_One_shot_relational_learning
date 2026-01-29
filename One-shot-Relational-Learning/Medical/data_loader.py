@@ -112,35 +112,38 @@ def train_generate(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2):
         yield support_pairs, query_pairs, false_pairs, support_left, support_right, query_left, query_right, false_left, false_right
 
 
-def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, train_file='train_tasks.json'):
-    logging.info(f'LOADING MEDICAL TRAINING DATA FROM {train_file}')
-    
-    file_path = dataset + '/' + train_file
-    if train_file.endswith('.jsonl'):
+    def train_generate_medical(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2, train_file='train_tasks.json'):
+        logging.info(f'LOADING MEDICAL TRAINING DATA FROM {train_file}')
+        
+        file_path = dataset + '/' + train_file
+        if train_file.endswith('.jsonl'):
             train_tasks = defaultdict(list)
             with open(file_path, 'r') as f:
                 for line in f:
                     data = json.loads(line)
+                    
                     # Check for standard 'head', 'relation', 'tail' keys
                     h = data.get('head') or data.get('h')
                     r = data.get('relation') or data.get('r')
                     t = data.get('tail') or data.get('t')
                     
                     # If keys are missing, try the 'query' or 'query_enc' fallback
-                    if not h:
+                    if not h or not t:
                         q = data.get('query') or data.get('query_enc')
-                        if q:
+                        if isinstance(q, list) and len(q) >= 2:
                             h, t = q[0], q[1]
                     
+                    # Only include if all three are present
                     if h and r and t:
                         train_tasks[r].append([h, r, t])
-    else:
-        train_tasks = json.load(open(file_path))
+        else:
+            train_tasks = json.load(open(file_path))
+    
+        rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
+        task_pool = list(train_tasks.keys())
+        num_tasks = len(task_pool)
+        rel_idx = 0
 
-    rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
-    task_pool = list(train_tasks.keys())
-    num_tasks = len(task_pool)
-    rel_idx = 0
 
     def escape_token(token):
         return str(token).replace(" ", "_")
