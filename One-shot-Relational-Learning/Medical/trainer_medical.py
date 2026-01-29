@@ -201,28 +201,28 @@ class Trainer(object):
         embeddings.append(list(np.zeros((ent_embed.shape[1],))))
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
-    
-            # Final symbol mapping
-            embeddings = []
-            i = 0
-            for key in rel2id.keys():
-                if key not in ['','OOV']:
-                    symbol_id[key] = i
-                    i += 1
-                    embeddings.append(list(rel_embed[rel2id[key],:]))
-            for key in ent2id.keys():
-                if key not in ['', 'OOV']:
-                    symbol_id[key] = i
-                    i += 1
-                    embeddings.append(list(ent_embed[ent2id[key],:]))
-            
-            symbol_id['PAD'] = i
-            # PAD must match the new 200D width
-            embeddings.append(list(np.zeros((ent_embed.shape[1],))))
-            self.symbol2id = symbol_id
-            self.symbol2vec = np.array(embeddings)
+        # Final symbol mapping - Ensure this is indented with 8 spaces
+        embeddings = []
+        i = 0
+        for key in rel2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(rel_embed[rel2id[key], :]))
         
-            
+        for key in ent2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(ent_embed[ent2id[key], :]))
+        
+        # PAD must match the new 200D width
+        symbol_id['PAD'] = i
+        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
+        
+        self.symbol2id = symbol_id
+        self.symbol2vec = np.array(embeddings)
+
       
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
