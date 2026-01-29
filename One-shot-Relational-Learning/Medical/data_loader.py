@@ -2,6 +2,7 @@ import json
 import random
 from tqdm import tqdm
 import logging
+from collections import defaultdict
 
 def train_generate_simple(dataset, batch_size, few, symbol2id):
     logging.info('LOADING TRAINING DATA')
