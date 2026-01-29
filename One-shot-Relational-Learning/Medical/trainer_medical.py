@@ -93,17 +93,27 @@ class Trainer(object):
 
     
     def load_tasks(self, file_path):
-        if file_path.endswith('.json'):
-            return json.load(open(file_path))
-
-        tasks = defaultdict(list)
-        with open(file_path, 'r') as f:
-            for line in f:
-                data = json.loads(line)
-                tasks[data['relation']].append(
-                    [data['query_enc'][0], data['relation'], data['query_enc'][1]]
-                )
-        return tasks
+            """Groups JSONL triples by relation for evaluation compatibility."""
+            if file_path.endswith('.json'):
+                return json.load(open(file_path))
+            
+            tasks = defaultdict(list)
+            with open(file_path, 'r') as f:
+                for line in f:
+                    data = json.loads(line)
+                    # Apply same fallback logic here
+                    h = data.get('head') or data.get('h')
+                    r = data.get('relation') or data.get('r')
+                    t = data.get('tail') or data.get('t')
+                    
+                    if not h or not t:
+                        q = data.get('query') or data.get('query_enc')
+                        if isinstance(q, list) and len(q) >= 2:
+                            h, t = q[0], q[1]
+                    
+                    if h and r and t:
+                        tasks[r].append([h, r, t])
+            return tasks
 
     def load_symbol2id(self):
         symbol_id = {}
