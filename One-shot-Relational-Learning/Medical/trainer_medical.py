@@ -162,46 +162,29 @@ class Trainer(object):
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
-                logging.info('CONCATENATING SEMANTIC ANCHORS (100D + 100D)')
+                logging.info('WEIGHTED CONCATENATION (Structural + 0.2*Semantic)')
                 ft_anchors = np.load(ft_path)
                 
                 # Standardize Semantic Channel independently
                 ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
                 
-                # Compress FastText to 100D if it is 200D to match structural width
+                # Compress FastText to 100D if it is 200D
                 if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
                     ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
                 
-                # --- CONCATENATION SHIFT ---
-                # Entities get [Struct ; Semantic] -> 200D
-                ent_embed = np.concatenate([ent_embed, ft_anchors], axis=1)
-                # Relations get zero-padding for the semantic half to maintain 200D shape
+                # --- THE FIX: WEIGHTED CONCATENATION ---
+                # We scale the semantic channel by 0.2 so it doesn't overpower the graph
+                semantic_weight = 0.2
+                ent_embed = np.concatenate([ent_embed, semantic_weight * ft_anchors], axis=1)
+                
+                # Relations get zero-padding to match 200D
                 rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
-                logging.info(f"Final Embedding Dimension: {ent_embed.shape[1]}")
+                logging.info(f"Final Weighted Embedding Dimension: {ent_embed.shape[1]}")
             else:
                 logging.error(f"FastText file not found at {ft_path}")
 
-        # Final symbol mapping
-        embeddings = []
-        i = 0
-        for key in rel2id.keys():
-            if key not in ['','OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(rel_embed[rel2id[key],:]))
-        for key in ent2id.keys():
-            if key not in ['', 'OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(ent_embed[ent2id[key],:]))
-        
-        symbol_id['PAD'] = i
-        # PAD must match the new 200D width
-        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
-        self.symbol2id = symbol_id
-        self.symbol2vec = np.array(embeddings)
-        # Final symbol mapping - Ensure this is indented with 8 spaces
+        # Final symbol mapping (Cleaned and Deduplicated)
         embeddings = []
         i = 0
         for key in rel2id.keys():
@@ -216,13 +199,11 @@ class Trainer(object):
                 i += 1
                 embeddings.append(list(ent_embed[ent2id[key], :]))
         
-        # PAD must match the new 200D width
         symbol_id['PAD'] = i
         embeddings.append(list(np.zeros((ent_embed.shape[1],))))
         
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
-
       
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
