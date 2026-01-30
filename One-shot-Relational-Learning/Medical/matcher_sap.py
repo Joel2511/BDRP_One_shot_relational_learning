@@ -44,6 +44,11 @@ class EmbedMatcher(nn.Module):
                 logging.info('FIX KB EMBEDDING (Non-Trainable)')
                 self.symbol_emb.weight.requires_grad = False
 
+            # Sanity check: embedding dimension must match matcher expectation
+            assert embed.shape[1] == self.actual_dim, \
+                f"Embedding dim mismatch: {embed.shape[1]} vs {self.actual_dim}"
+
+
         # Encoder widths must match the 2*Actual_Dim (Head + Tail)
         d_model = self.actual_dim * 2
         self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
