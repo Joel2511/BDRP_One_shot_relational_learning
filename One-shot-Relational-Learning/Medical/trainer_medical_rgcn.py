@@ -141,13 +141,11 @@ class Trainer(object):
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
-        # --- NEW RGCN COMPATIBLE LOADING ---
+        # 1. LOAD DATA FIRST
         if self.embed_model == 'RGCN':
-            # RGCN is real-valued only. No splitting needed.
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
             logging.info("Loaded RGCN as pure real-valued vectors.")
-        
         elif self.embed_model == 'ComplEx':
             try:
                 ent_embed = np.loadtxt(ent_file)
@@ -161,18 +159,32 @@ class Trainer(object):
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
 
-        # Standardize structural channel
-        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
-        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
+        # 2. APPLY MODEL-SPECIFIC NORMALIZATION
+        if self.embed_model == 'RGCN':
+            logging.info("Applying Robust Quantile Normalization to RGCN...")
+            # Use 1st and 99th percentiles to handle the -111/+70 outliers
+            e_min, e_max = np.percentile(ent_embed, [1, 99])
+            r_min, r_max = np.percentile(rel_embed, [1, 99])
+            
+            ent_embed = np.clip(ent_embed, e_min, e_max)
+            rel_embed = np.clip(rel_embed, r_min, r_max)
+            
+            # Scale to [-1, 1] to prevent magnitude explosion in Matcher
+            ent_embed = (ent_embed - ent_embed.min()) / (ent_embed.max() - ent_embed.min() + 1e-6) * 2 - 1
+            rel_embed = (rel_embed - rel_embed.min()) / (rel_embed.max() - rel_embed.min() + 1e-6) * 2 - 1
+            logging.info(f"RGCN Normalized. New Entity Max Norm: {np.mean(np.linalg.norm(ent_embed, axis=1)):.2f}")
+        else:
+            # Standard normalization for ComplEx or others
+            ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
+            rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
 
-        # Weighted Concatenation (Same logic as before, but with RGCN)
+        # 3. WEIGHTED CONCATENATION
         if hasattr(self, 'use_fasttext') and self.use_fasttext:
             ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
             if os.path.exists(ft_path):
                 ft_anchors = np.load(ft_path)
                 ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
                 
-                # Compress 200D FastText to 100D if needed
                 if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
                     ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
                 
@@ -181,9 +193,9 @@ class Trainer(object):
                 
                 rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
-                logging.info(f"Final RGCN+FT Weighted Dim: {ent_embed.shape[1]}")
+                logging.info(f"Final {self.embed_model}+FT Weighted Dim: {ent_embed.shape[1]}")
 
-        # Final symbol mapping (rest of your code stays the same)
+        # Final symbol mapping
         embeddings = []
         i = 0
         for key in rel2id.keys():
