@@ -159,30 +159,30 @@ class Trainer(object):
         rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
 
         # 2. Integrate Semantic Channel (FastText)
-        if hasattr(self, 'use_fasttext') and self.use_fasttext:
-            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
-            if os.path.exists(ft_path):
-                logging.info('WEIGHTED CONCATENATION (Structural + 0.2*Semantic)')
-                ft_anchors = np.load(ft_path)
-                
-                # Standardize Semantic Channel independently
-                ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
-                
-                # Compress FastText to 100D if it is 200D
-                if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
-                    ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
-                
-                # --- THE FIX: WEIGHTED CONCATENATION ---
-                # We scale the semantic channel by 0.2 so it doesn't overpower the graph
-                semantic_weight = 0.2
-                ent_embed = np.concatenate([ent_embed, semantic_weight * ft_anchors], axis=1)
-                
-                # Relations get zero-padding to match 200D
-                rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
+        if hasattr(self, 'use_semantic') and self.use_semantic:
+            sb_path = os.path.join(os.path.dirname(self.dataset), 'medical_sapbert_anchors.npy')
+            if os.path.exists(sb_path):
+                logging.info('INTEGRATING SapBERT SEMANTIC CHANNEL')
+                sb = np.load(sb_path)
+        
+                # Standardize SapBERT independently
+                sb = (sb - sb.mean(axis=0, keepdims=True)) / (sb.std(axis=0, keepdims=True) + 1e-3)
+        
+                # Project 768D -> 100D using PCA-like random projection (fixed, no training)
+                if sb.shape[1] != ent_embed.shape[1]:
+                    rng = np.random.RandomState(42)
+                    proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]), size=(sb.shape[1], ent_embed.shape[1]))
+                    sb = sb @ proj
+        
+                semantic_weight = 0.15
+                ent_embed = np.concatenate([ent_embed, semantic_weight * sb], axis=1)
+        
+                rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
-                logging.info(f"Final Weighted Embedding Dimension: {ent_embed.shape[1]}")
+        
+                logging.info(f'Final embedding dim: {ent_embed.shape[1]}')
             else:
-                logging.error(f"FastText file not found at {ft_path}")
+                logging.error(f'SapBERT file not found at {sb_path}')
 
         # Final symbol mapping (Cleaned and Deduplicated)
         embeddings = []
