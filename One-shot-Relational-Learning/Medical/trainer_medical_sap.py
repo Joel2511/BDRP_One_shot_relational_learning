@@ -12,7 +12,7 @@ import random
 
 from args import read_options
 from data_loader import *
-from matcher import * #mean + distance neighbor encoding 
+from matcher_sap import * #mean + distance neighbor encoding 
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
