@@ -64,6 +64,7 @@ class Trainer(object):
         self.parameters = filter(lambda p: p.requires_grad, self.matcher.parameters())
         self.optim = optim.Adam(self.parameters, lr=self.lr, weight_decay=self.weight_decay)
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[200000], gamma=0.5)
+        self.use_semantic = args.use_semantic
 
         self.ent2id = json.load(open(self.dataset + '/ent2ids'))
         self.num_ents = len(self.ent2id.keys())
