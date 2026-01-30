@@ -32,7 +32,7 @@ def read_options():
                         help="Number of closest neighbors to keep (for Distance Filtering).")
     parser.add_argument('--knn_k', type=int, default=32, help='k-NN neighbors')
     parser.add_argument('--knn_alpha', type=float, default=0.5, help='self+knn interp')
-    parser.add_argument('--use_fasttext', action='store_true', help='Use FastText semantic anchors')
+    parser.add_argument('--use_semantic', action='store_true', help='Use semantic anchors (SapBERT)')
 
     # --- DATASET FILTERING ---
     parser.add_argument('--object_only', action='store_true', help='Use filtered Object-Property only data')
