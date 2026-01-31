@@ -149,43 +149,35 @@ class Trainer(object):
             except ValueError:
                 ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
                 rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
-                ent_embed = np.concatenate(
-                    [ent_embed_c.real, ent_embed_c.imag], axis=-1
-                )
-                rel_embed = np.concatenate(
-                    [rel_embed_c.real, rel_embed_c.imag], axis=-1
-                )
+                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
+                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
         else:
             ent_embed = np.loadtxt(ent_file)
             rel_embed = np.loadtxt(rel_file)
     
-        # 1. Standardize structural embeddings
-        ent_embed = (ent_embed - ent_embed.mean()) / (ent_embed.std() + 1e-3)
-        rel_embed = (rel_embed - rel_embed.mean()) / (rel_embed.std() + 1e-3)
+        # 1. Standardize Structural Channel
+        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
+        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
     
-        # 2. Integrate semantic channel (SapBERT) WITHOUT projection
+        # 2. Integrate Semantic Channel (SapBERT)
         if hasattr(self, 'use_semantic') and self.use_semantic:
-            sb_path = os.path.join(
-                os.path.dirname(self.dataset),
-                'medical_sapbert_anchors.npy'
-            )
-    
+            sb_path = os.path.join(os.path.dirname(self.dataset), 'medical_sapbert_anchors.npy')
             if os.path.exists(sb_path):
                 logging.info('INTEGRATING SapBERT SEMANTIC CHANNEL')
                 sb = np.load(sb_path)
     
                 # Standardize SapBERT independently
-                sb = (sb - sb.mean(axis=0, keepdims=True)) / (
-                    sb.std(axis=0, keepdims=True) + 1e-3
-                )
+                sb = (sb - sb.mean(axis=0, keepdims=True)) / (sb.std(axis=0, keepdims=True) + 1e-3)
     
-                # Full-strength semantic signal
-                semantic_weight = 1.0
-                ent_embed = np.concatenate(
-                    [ent_embed, semantic_weight * sb], axis=1
-                )
+                # Project SapBERT to structural embedding dim (100D)
+                if sb.shape[1] != ent_embed.shape[1]:
+                    rng = np.random.RandomState(42)
+                    proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]), size=(sb.shape[1], ent_embed.shape[1]))
+                    sb = sb @ proj
     
-                # Pad relations with zeros for semantic dimensions
+                semantic_weight = 0.1  # reduced to avoid overpowering ComplEx
+                ent_embed = np.concatenate([ent_embed, semantic_weight * sb], axis=1)
+    
                 rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
     
@@ -193,27 +185,27 @@ class Trainer(object):
             else:
                 logging.error(f'SapBERT file not found at {sb_path}')
     
-        # 3. Build symbol table
+        # Final symbol mapping (Cleaned and Deduplicated)
         embeddings = []
         i = 0
-    
         for key in rel2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
-                embeddings.append(rel_embed[rel2id[key]])
                 i += 1
+                embeddings.append(list(rel_embed[rel2id[key], :]))
     
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
-                embeddings.append(ent_embed[ent2id[key]])
                 i += 1
+                embeddings.append(list(ent_embed[ent2id[key], :]))
     
         symbol_id['PAD'] = i
-        embeddings.append(np.zeros((ent_embed.shape[1],)))
+        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
     
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
+
 
       
     # --- CONNECTION MATRIX ---
