@@ -63,7 +63,7 @@ class Trainer(object):
 
         self.parameters = filter(lambda p: p.requires_grad, self.matcher.parameters())
         self.optim = optim.Adam(self.parameters, lr=self.lr, weight_decay=self.weight_decay)
-        self.scheduler = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[200000], gamma=0.5)
+        self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
         self.use_semantic = args.use_semantic
 
         self.ent2id = json.load(open(self.dataset + '/ent2ids'))
@@ -253,22 +253,34 @@ class Trainer(object):
         best_hits10 = 0.0
         losses = deque([], self.log_every)
         
-        rel_weight_map = {
-            'positivelyRegulatesGO': 15.0, 
-            'negativelyRegulatesGO': 15.0, 
-            'regulatesGO': 10.0, 
-            'hasGeneticInteractionWith': 5.0,
-            'hasGeneExpressionOA': 1.0, 
-            'isAssociatedWithGO': 1.0
-        }
+        # ----- SMART RELATION PENALTY WEIGHTS -----
+        # Use inverse sqrt of train frequency for weighting
+        relation_freq = {}  # will store counts before training
+        train_path = os.path.join(self.dataset, self.train_file)
+        with open(train_path, 'r') as f:
+            for line in f:
+                data = json.loads(line)
+                rel = data.get('relation') or data.get('r')
+                if rel:
+                    relation_freq[rel] = relation_freq.get(rel, 0) + 1
+        
+        # Find max freq to normalize weights
+        max_freq = max(relation_freq.values()) if relation_freq else 1
+        epsilon = 1e-6
         
         weight_tensor = torch.ones(len(self.symbol2id)).to(self.device)
-        for rel_name, weight in rel_weight_map.items():
-            esc_name = self.escape_token(rel_name)
-            if esc_name in self.symbol2id:
-                rel_idx = self.symbol2id[esc_name]
-                weight_tensor[rel_idx] = weight
-                logging.info(f"Penalty Weight Active - {rel_name}: {weight}")
+        
+        for rel, freq in relation_freq.items():
+            esc = self.escape_token(rel)
+            if esc in self.symbol2id:
+                rid = self.symbol2id[esc]
+                # inverse sqrt weighting
+                w = (max_freq / (freq + epsilon)) ** 0.5
+                # clamp to avoid too huge
+                w = float(min(max(w, 1.0), 10.0))
+                weight_tensor[rid] = w
+                logging.info(f"Relation {rel} freq={freq}, weight={w:.3f}")
+
         
         from data_loader import train_generate_medical 
         
@@ -298,7 +310,7 @@ class Trainer(object):
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
     
-            adv_temperature = 0.5
+            adv_temperature = 1.0
             neg_num = false_scores.size(0) // query_scores.size(0)
             f_scores = false_scores.view(query_scores.size(0), neg_num)
             
@@ -370,6 +382,10 @@ class Trainer(object):
         EVAL_BATCH_SIZE = 1024 
     
         for query_ in tqdm(test_tasks.keys(), desc="Evaluating Relations"):
+            if len(test_tasks[query_]) < 2:
+                logging.warning(f"Skipping {query_} eval due to too few examples ({len(test_tasks[query_])})")
+                continue
+
             hits10_, hits5_, hits1_, mrr_ = [], [], [], []
             candidates = rel2candidates.get(query_, [])
             if not candidates:
