@@ -10,16 +10,18 @@ from modules import *
 class EmbedMatcher(nn.Module):
     """
     CONCATENATION-BASED MATCHER [Structural ; Semantic]
-    Optimized for 200D Multi-Channel Medical Knowledge Graphs
+    Optimized for Multi-Channel Medical Knowledge Graphs
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, 
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, 
                  aggregate='max', knn_k=32, knn_path=None, knn_alpha=0.5):
         super(EmbedMatcher, self).__init__()
         
-        # When concatenating 100D + 100D, the internal feature dim becomes 200
-        # If use_fasttext is on, we double the expected input dim
-        self.actual_dim = embed_dim * 2 if (embed is not None and embed.shape[1] > embed_dim) else embed_dim
+        # Detect actual embedding dim from preloaded embeddings
+        if embed is not None:
+            self.actual_dim = embed.shape[1]
+        else:
+            self.actual_dim = embed_dim  # fallback
         self.embed_dim = self.actual_dim 
         
         self.pad_idx = num_symbols
@@ -29,7 +31,7 @@ class EmbedMatcher(nn.Module):
         self.knn_k = knn_k
         self.knn_alpha = knn_alpha  
 
-        # GCN weights must match the 2*Actual_Dim due to Relation+Entity concatenation
+        # GCN weights must match the concatenated dim (head+tail = 2*actual_dim)
         self.gcn_w = nn.Linear(2 * self.actual_dim, self.actual_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.actual_dim))
         self.dropout = nn.Dropout(dropout)
@@ -44,11 +46,6 @@ class EmbedMatcher(nn.Module):
                 logging.info('FIX KB EMBEDDING (Non-Trainable)')
                 self.symbol_emb.weight.requires_grad = False
 
-            # Sanity check: embedding dimension must match matcher expectation
-            assert embed.shape[1] == self.actual_dim, \
-                f"Embedding dim mismatch: {embed.shape[1]} vs {self.actual_dim}"
-
-
         # Encoder widths must match the 2*Actual_Dim (Head + Tail)
         d_model = self.actual_dim * 2
         self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
@@ -58,6 +55,7 @@ class EmbedMatcher(nn.Module):
         self.knn_neighbors = None 
         if knn_path is not None:
             self.load_knn_index(knn_path)
+
 
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
