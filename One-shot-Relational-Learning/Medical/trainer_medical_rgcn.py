@@ -131,7 +131,7 @@ class Trainer(object):
         symbol_id['PAD'] = i
         self.symbol2id = symbol_id
         self.symbol2vec = None
-
+        
     def load_embed(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
@@ -141,78 +141,40 @@ class Trainer(object):
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
 
-        # 1. LOAD DATA FIRST
-        if self.embed_model == 'RGCN':
-            ent_embed = np.loadtxt(ent_file)
-            rel_embed = np.loadtxt(rel_file)
-            logging.info("Loaded RGCN as pure real-valued vectors.")
-        elif self.embed_model == 'ComplEx':
-            try:
-                ent_embed = np.loadtxt(ent_file)
-                rel_embed = np.loadtxt(rel_file)
-            except ValueError:
-                ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
-                rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
-                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
-                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
-        else:
-            ent_embed = np.loadtxt(ent_file)
-            rel_embed = np.loadtxt(rel_file)
+        # 1. Load RGCN vectors
+        ent_embed = np.loadtxt(ent_file)
+        rel_embed = np.loadtxt(rel_file)
 
-        # 2. APPLY MODEL-SPECIFIC NORMALIZATION
-        if self.embed_model == 'RGCN':
-            logging.info("Applying Robust Quantile Normalization to RGCN...")
-            # Use 1st and 99th percentiles to handle the -111/+70 outliers
-            e_min, e_max = np.percentile(ent_embed, [1, 99])
-            r_min, r_max = np.percentile(rel_embed, [1, 99])
-            
-            ent_embed = np.clip(ent_embed, e_min, e_max)
-            rel_embed = np.clip(rel_embed, r_min, r_max)
-            
-            # Scale to [-1, 1] to prevent magnitude explosion in Matcher
-            ent_embed = (ent_embed - ent_embed.min()) / (ent_embed.max() - ent_embed.min() + 1e-6) * 2 - 1
-            rel_embed = (rel_embed - rel_embed.min()) / (rel_embed.max() - rel_embed.min() + 1e-6) * 2 - 1
-            logging.info(f"RGCN Normalized. New Entity Max Norm: {np.mean(np.linalg.norm(ent_embed, axis=1)):.2f}")
-        else:
-            # Standard normalization for ComplEx or others
-            ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
-            rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
+        # 2. Normalize RGCN (Handling outliers)
+        e_min, e_max = np.percentile(ent_embed, [1, 99])
+        r_min, r_max = np.percentile(rel_embed, [1, 99])
+        ent_embed = np.clip(ent_embed, e_min, e_max)
+        rel_embed = np.clip(rel_embed, r_min, r_max)
+        ent_embed = (ent_embed - ent_embed.min()) / (ent_embed.max() - ent_embed.min() + 1e-6) * 2 - 1
+        rel_embed = (rel_embed - rel_embed.min()) / (rel_embed.max() - rel_embed.min() + 1e-6) * 2 - 1
 
-        # 3. WEIGHTED CONCATENATION
-        if hasattr(self, 'use_fasttext') and self.use_fasttext:
-            ft_path = os.path.join(os.path.dirname(self.dataset), 'medical_fasttext_anchors.npy')
-            if os.path.exists(ft_path):
-                ft_anchors = np.load(ft_path)
-                ft_anchors = (ft_anchors - np.mean(ft_anchors)) / (np.std(ft_anchors) + 1e-3)
-                
-                if ft_anchors.shape[1] == 200 and ent_embed.shape[1] == 100:
-                    ft_anchors = (ft_anchors[:, 0::2] + ft_anchors[:, 1::2]) / 2
-                
-                semantic_weight = 0.2
-                ent_embed = np.concatenate([ent_embed, semantic_weight * ft_anchors], axis=1)
-                
-                rel_padding = np.zeros((rel_embed.shape[0], ft_anchors.shape[1]))
+        # 3. Integrate Semantic Channel
+        if hasattr(self, 'use_semantic') and self.use_semantic:
+            sem_type = getattr(self, 'semantic_type', 'pubmedbert')
+            sb_filename = f'medical_{sem_type}_anchors.npy'
+            sb_path = os.path.join(os.path.dirname(self.dataset), sb_filename)
+            
+            if os.path.exists(sb_path):
+                logging.info(f'INTEGRATING {sem_type.upper()} SEMANTIC CHANNEL')
+                sb = np.load(sb_path)
+                sb = (sb - sb.mean(axis=0, keepdims=True)) / (sb.std(axis=0, keepdims=True) + 1e-3)
+
+                if sb.shape[1] != ent_embed.shape[1]:
+                    rng = np.random.RandomState(42)
+                    proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]), size=(sb.shape[1], ent_embed.shape[1]))
+                    sb = sb @ proj
+
+                semantic_weight = 0.1
+                ent_embed = np.concatenate([ent_embed, semantic_weight * sb], axis=1)
+                rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
-                logging.info(f"Final {self.embed_model}+FT Weighted Dim: {ent_embed.shape[1]}")
-
-        # Final symbol mapping
-        embeddings = []
-        i = 0
-        for key in rel2id.keys():
-            if key not in ['', 'OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(rel_embed[rel2id[key], :]))
-        for key in ent2id.keys():
-            if key not in ['', 'OOV']:
-                symbol_id[key] = i
-                i += 1
-                embeddings.append(list(ent_embed[ent2id[key], :]))
-        
-        symbol_id['PAD'] = i
-        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
-        self.symbol2id = symbol_id
-        self.symbol2vec = np.array(embeddings)
+            else:
+                logging.error(f'FILE NOT FOUND: {sb_path}')
       
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
