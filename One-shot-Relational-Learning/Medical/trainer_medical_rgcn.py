@@ -175,6 +175,26 @@ class Trainer(object):
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
             else:
                 logging.error(f'FILE NOT FOUND: {sb_path}')
+
+        embeddings = []
+        i = 0
+        for key in rel2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(rel_embed[rel2id[key], :]))
+        for key in ent2id.keys():
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                i += 1
+                embeddings.append(list(ent_embed[ent2id[key], :]))
+        
+        symbol_id['PAD'] = i
+        embeddings.append(list(np.zeros((ent_embed.shape[1],))))
+        
+        # --- ATTACH TO SELF ---
+        self.symbol2id = symbol_id
+        self.symbol2vec = np.array(embeddings)
       
     # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
