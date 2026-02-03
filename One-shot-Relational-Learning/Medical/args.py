@@ -33,6 +33,7 @@ def read_options():
     parser.add_argument('--knn_k', type=int, default=32, help='k-NN neighbors')
     parser.add_argument('--knn_alpha', type=float, default=0.5, help='self+knn interp')
     parser.add_argument('--use_semantic', action='store_true', help='Use semantic anchors (SapBERT)')
+    parser.add_argument('--semantic_type', type=str, default='pubmedbert', choices=['sapbert', 'pubmedbert'],help='Which semantic anchors to load.')
 
     # --- DATASET FILTERING ---
     parser.add_argument('--object_only', action='store_true', help='Use filtered Object-Property only data')
