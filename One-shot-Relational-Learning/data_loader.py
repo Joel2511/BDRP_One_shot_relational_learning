@@ -47,7 +47,19 @@ def train_generate(dataset, batch_size, few, symbol2id, ent2id, e1rel_e2):
     train_tasks = json.load(open(dataset + '/train_tasks.json'))
     logging.info('LOADING CANDIDATES')
     rel2candidates = json.load(open(dataset + '/rel2candidates.json'))
-    task_pool = list(train_tasks.keys())
+    
+    # --- FAIR COMPARISON FIX: FILTER ATTRIBUTES ---
+    attribute_properties = [
+        'hasDescription', 'hasID', 'hasLog2_FC', 'hasPValue', 
+        'hasName', 'hasURI', 'hasNeutrophilProportion', 
+        'hasGender', 'hasGroupId', 'hasSeverity', 
+        'hasAge', 'hasGroupDay'
+    ]
+    
+    # Only keep relations NOT in the attribute list
+    task_pool = [rel for rel in train_tasks.keys() if rel not in attribute_properties]
+    # -----------------------------------------------
+    
     num_tasks = len(task_pool)
     rel_idx = 0
 
