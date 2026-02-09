@@ -277,7 +277,7 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- OPTIMIZED EVALUATION (BATCHED for Whole Dataset) ---
+# --- OPTIMIZED EVALUATION (BATCHED for Whole Dataset) ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
@@ -285,17 +285,28 @@ class Trainer(object):
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
         if mode == 'dev':
-            # Try NELL/FB15k name first, then ATOMIC-style dev file
             dev_path_std = os.path.join(self.dataset, 'validation_tasks.json')
             dev_path_alt = os.path.join(self.dataset, 'dev_tasks.json')
             if os.path.exists(dev_path_std):
-                test_tasks = json.load(open(dev_path_std))
+                test_tasks_all = json.load(open(dev_path_std))
             elif os.path.exists(dev_path_alt):
-                test_tasks = json.load(open(dev_path_alt))
+                test_tasks_all = json.load(open(dev_path_alt))
             else:
                 raise FileNotFoundError(f"No dev tasks file found in {self.dataset}")
         else:
-            test_tasks = json.load(open(os.path.join(self.dataset, 'test_tasks.json')))
+            test_tasks_all = json.load(open(os.path.join(self.dataset, 'test_tasks.json')))
+
+        # --- FAIR COMPARISON FIX: FILTER EVALUATION ---
+        attribute_properties = [
+            'hasDescription', 'hasID', 'hasLog2_FC', 'hasPValue', 
+            'hasName', 'hasURI', 'hasNeutrophilProportion', 
+            'hasGender', 'hasGroupId', 'hasSeverity', 
+            'hasAge', 'hasGroupDay'
+        ]
+        
+        # Only evaluate biological object properties
+        test_tasks = {k: v for k, v in test_tasks_all.items() if k not in attribute_properties}
+        # -----------------------------------------------
 
         rel2candidates = self.rel2candidates
         hits10, hits5, hits1, mrr = [], [], [], []
@@ -355,9 +366,9 @@ class Trainer(object):
                         scores_t = self.matcher(query_batch, support)
 
                     if 'fb15k' in self.dataset.lower():
-                        if scores_t.dim() == 0:  # 0-d scalar → 1d tensor
+                        if scores_t.dim() == 0:
                             scores_t = scores_t.unsqueeze(0)
-                        elif scores_t.dim() > 1:  # Unexpected higher dims → flatten
+                        elif scores_t.dim() > 1:
                             scores_t = scores_t.view(-1)
                     all_scores.extend(scores_t.detach().cpu().numpy())
 
