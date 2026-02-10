@@ -315,8 +315,8 @@ class Trainer(object):
                 # Pass entity IDs to neighbor_encoder inside matcher
                 query_entity_ids = query  # head/tail IDs
                 support_entity_ids = support
-                query_scores = self.matcher(query, support, query_meta, support_meta, entity_ids=(query_entity_ids, support_entity_ids))
-                false_scores = self.matcher(false, support, query_meta, support_meta, entity_ids=(query_entity_ids, support_entity_ids))
+                query_scores = self.matcher(query, support, query_meta, support_meta)
+                false_scores = self.matcher(false, support, query_meta, support_meta)
 
     
             adv_temperature = 1.0
