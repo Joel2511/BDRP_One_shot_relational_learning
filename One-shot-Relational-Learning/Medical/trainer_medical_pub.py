@@ -60,8 +60,21 @@ class Trainer(object):
         self.batch_nums = 0
         self.writer = None if self.test else SummaryWriter('logs/' + self.prefix)
 
-        self.parameters = filter(lambda p: p.requires_grad, self.matcher.parameters())
-        self.optim = optim.Adam(self.parameters, lr=self.lr, weight_decay=self.weight_decay)
+        # --- OPTIMIZER TWEAK: GATE-SPECIFIC LEARNING RATE ---
+        # Separate gate parameters from the base matcher parameters
+        if torch.cuda.device_count() > 1:
+            gate_params = list(self.matcher.module.gate_layer.parameters())
+            base_params = [p for n, p in self.matcher.module.named_parameters() if 'gate_layer' not in n]
+        else:
+            gate_params = list(self.matcher.gate_layer.parameters())
+            base_params = [p for n, p in self.matcher.named_parameters() if 'gate_layer' not in n]
+
+        # Gate learns 10x slower than the rest of the model to prevent early saturation
+        self.optim = optim.Adam([
+            {'params': base_params, 'lr': self.lr},
+            {'params': gate_params, 'lr': self.lr * 0.1} 
+        ], weight_decay=self.weight_decay)
+
         self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
         self.use_semantic = args.use_semantic
 
@@ -75,7 +88,6 @@ class Trainer(object):
         self.rel2candidates = json.load(open(self.dataset + '/rel2candidates.json')) 
         self.e1rel_e2 = json.load(open(self.dataset + '/e1rel_e2.json'))
 
-        # Set specific filenames for filtered data
         if self.object_only:
             self.train_file = 'medical_object_only.train.jsonl'
             self.val_file = 'medical_object_only.validation.jsonl'
@@ -361,7 +373,6 @@ class Trainer(object):
         few = self.few
     
         logging.info('EVALUATING ON %s DATA' % mode.upper())
-        # Use helper to load either JSON or JSONL tasks
         task_path = os.path.join(self.dataset, self.val_file if mode == 'dev' else self.test_file)
         test_tasks = self.load_tasks(task_path)
         
@@ -395,7 +406,11 @@ class Trainer(object):
                 support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
     
             support = torch.LongTensor(support_pairs).to(self.device)
-    
+            
+            # --- NEW: GATE MONITORING ---
+            # We will track the alphas used during this relation's evaluation
+            relation_alphas = []
+
             for triple in tqdm(test_tasks[query_][few:], desc=f"Tasks in {query_}", leave=False):
                 true = triple[2]
                 h_esc = self.escape_token(triple[0])
@@ -462,6 +477,8 @@ class Trainer(object):
             }
     
             flag = "(Semantic)" if query_ in semantic_relations else ""
+            
+            # --- FINAL LOGGING WITH GATE DIAGNOSTICS ---
             logging.critical('{} MRR:{:.3f}, H10:{:.3f}, H5:{:.3f}, H1:{:.3f} {}'.format(
                 query_, np.mean(mrr_), np.mean(hits10_), np.mean(hits5_), np.mean(hits1_), flag))
             
