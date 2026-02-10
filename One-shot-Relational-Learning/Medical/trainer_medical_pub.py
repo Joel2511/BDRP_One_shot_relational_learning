@@ -52,7 +52,6 @@ class Trainer(object):
             finetune=self.fine_tune,
             aggregate=self.aggregate,
             knn_k=self.knn_k,
-            knn_alpha=self.knn_alpha
         )
         if torch.cuda.device_count() > 1:
             self.matcher = torch.nn.DataParallel(self.matcher)
