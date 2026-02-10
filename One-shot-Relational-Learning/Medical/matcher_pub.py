@@ -14,7 +14,7 @@ class EmbedMatcher(nn.Module):
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, 
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, 
-                 aggregate='max', knn_k=32, knn_path=None, knn_alpha=0.5):
+                 aggregate='max', knn_k=32, knn_path=None):
         super(EmbedMatcher, self).__init__()
         
         if embed is not None:
