@@ -28,7 +28,7 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.num_symbols = num_symbols
         self.knn_k = knn_k
-        self.knn_alpha = knn_alpha  
+        #self.knn_alpha = knn_alpha  
 
         # GCN weights
         self.gcn_w = nn.Linear(2 * self.actual_dim, self.actual_dim)
