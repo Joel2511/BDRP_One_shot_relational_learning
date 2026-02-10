@@ -9,19 +9,18 @@ from modules import *
 
 class EmbedMatcher(nn.Module):
     """
-    CONCATENATION-BASED MATCHER [Structural ; Semantic]
-    Optimized for Multi-Channel Medical Knowledge Graphs
+    GATING-BASED MATCHER [Structural ; Semantic]
+    Dynamically weights Graph vs. Text signals using a Sigmoid Gate.
     """
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, 
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False, 
                  aggregate='max', knn_k=32, knn_path=None, knn_alpha=0.5):
         super(EmbedMatcher, self).__init__()
         
-        # Detect actual embedding dim from preloaded embeddings
         if embed is not None:
             self.actual_dim = embed.shape[1]
         else:
-            self.actual_dim = embed_dim  # fallback
+            self.actual_dim = embed_dim
         self.embed_dim = self.actual_dim 
         
         self.pad_idx = num_symbols
@@ -31,13 +30,20 @@ class EmbedMatcher(nn.Module):
         self.knn_k = knn_k
         self.knn_alpha = knn_alpha  
 
-        # GCN weights must match the concatenated dim (head+tail = 2*actual_dim)
+        # GCN weights
         self.gcn_w = nn.Linear(2 * self.actual_dim, self.actual_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.actual_dim))
+        
+        # --- NEW: Sigmoid Gating Layer ---
+        # Takes [Structural ; Semantic] and outputs a weight alpha
+        self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
+        
         self.dropout = nn.Dropout(dropout)
 
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
+        init.xavier_normal_(self.gate_layer.weight)
+        init.constant_(self.gate_layer.bias, 0)
 
         if use_pretrain and embed is not None:
             logging.info(f'LOADING {embed.shape[1]}D KB EMBEDDINGS INTO MATCHER')
@@ -46,7 +52,6 @@ class EmbedMatcher(nn.Module):
                 logging.info('FIX KB EMBEDDING (Non-Trainable)')
                 self.symbol_emb.weight.requires_grad = False
 
-        # Encoder widths must match the 2*Actual_Dim (Head + Tail)
         d_model = self.actual_dim * 2
         self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
         self.query_encoder = QueryEncoder(d_model, process_steps)
@@ -56,7 +61,6 @@ class EmbedMatcher(nn.Module):
         if knn_path is not None:
             self.load_knn_index(knn_path)
 
-
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
         relations = connections[:,:,0].squeeze(-1)
@@ -65,20 +69,27 @@ class EmbedMatcher(nn.Module):
         rel_embeds = self.dropout(self.symbol_emb(relations))
         ent_embeds = self.dropout(self.symbol_emb(entities))
         
-        # Concat head and relation within the neighborhood
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
         out = self.gcn_w(concat_embeds)
         
         out = torch.sum(out, dim=1) / num_neighbors
         structural_repr = out.tanh()
 
-        # Hybrid Enrichment (Semantic k-NN) logic remains compatible
         knn_mean = None
         if entity_ids is not None and self.knn_neighbors is not None:
             knn_mean = self.knn_neighbor_encoder(entity_ids)
 
+        # --- GATING LOGIC IMPLEMENTATION ---
         if knn_mean is not None:
-            final = self.knn_alpha * structural_repr + (1 - self.knn_alpha) * knn_mean
+            # Concatenate both signals to inspect their relative "energy"
+            gate_input = torch.cat((structural_repr, knn_mean), dim=-1)
+            
+            # alpha -> 1.0 means Sparse node (Trust PubMedBERT)
+            # alpha -> 0.0 means Dense node (Trust ComplEx Graph)
+            alpha = torch.sigmoid(self.gate_layer(gate_input))
+            
+            # Dynamic weighting based on node characteristics
+            final = (1 - alpha) * structural_repr + alpha * knn_mean
         else:
             final = structural_repr
             
@@ -130,7 +141,6 @@ class EmbedMatcher(nn.Module):
         
         query_f = self.query_encoder(support_g.squeeze(0), query_g)
         
-        # Block-wise Normalization occurs here:
         query_f = F.normalize(query_f, p=2, dim=-1)
         support_g = F.normalize(support_g.squeeze(0), p=2, dim=-1)
         
