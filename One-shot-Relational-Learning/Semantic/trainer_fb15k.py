@@ -343,9 +343,7 @@ class Trainer(object):
                 query_batch = torch.LongTensor(query_pairs).to(self.device)
 
                 if meta:
-                    left_idx = torch.LongTensor(left_ents).to(self.device)
-                    right_idx = torch.LongTensor(right_ents).to(self.device)
-                    query_meta_single = self.get_meta(left_idx, right_idx)
+                    query_meta_single = self.get_meta(left_ents, right_ents)
                     query_meta_single = tuple(t.to(self.device, non_blocking=True) for t in query_meta_single)
                 else:
                     query_meta_single = None
