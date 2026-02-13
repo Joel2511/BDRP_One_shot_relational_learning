@@ -43,12 +43,17 @@ class Trainer(object):
 
         # Load semantic embeddings for NELL-ONE
         self.semantic_vec = None
-        if 'fb15k' in self.dataset.lower():
-          semantic_path = '/gpfs/workdir/anilj/fb15k_data/fb15k_semantic_anchors.npy'
-          logging.info(f'LOADING FB15k SEMANTICS from {semantic_path}')
-          raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
-          import torch.nn.functional as F
-          self.semantic_vec = F.normalize(raw_sem, p=2, dim=1)
+        if 'fb15k' in self.dataset.lower() or self.semantic_type == 'bert':
+            # UPDATE THIS PATH to where you uploaded fb15k_semantic_anchors.npy
+            semantic_path = '/gpfs/workdir/anilj/fb15k_data/fb15k_semantic_anchors.npy'
+            logging.info(f'LOADING FB15K SEMANTIC EMBEDDINGS from {semantic_path}')
+            
+            # Load raw 768D BERT vectors
+            raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
+            
+            # CRITICAL: L2 Normalize so BERT (scale ~10) doesn't crush ComplEx (scale ~0.1)
+            import torch.nn.functional as F
+            self.semantic_vec = F.normalize(raw_sem, p=2, dim=1)
 
         # Matcher setup
         semantic_dim = self.semantic_vec.shape[1] if self.semantic_vec is not None else 0
