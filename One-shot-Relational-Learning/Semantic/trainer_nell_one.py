@@ -44,7 +44,7 @@ class Trainer(object):
         # Load semantic embeddings for NELL-ONE
         self.semantic_vec = None
         if 'nell-one' in self.dataset.lower():
-            semantic_path = '/gpfs/workdir/anilj/nell_data/semantic_anchors.npy'
+            semantic_path = '/gpfs/workdir/anilj/nell_data/nell_one_semantic_anchors.npy'
             logging.info(f'LOADING SEMANTIC EMBEDDINGS from {semantic_path}')
             raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
             # FIX: L2 Normalize so it operates on the same scale as ComplEx
