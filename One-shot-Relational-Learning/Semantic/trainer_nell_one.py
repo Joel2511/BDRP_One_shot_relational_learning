@@ -46,7 +46,10 @@ class Trainer(object):
         if 'nell-one' in self.dataset.lower():
             semantic_path = '/gpfs/workdir/anilj/nell_data/semantic_anchors.npy'
             logging.info(f'LOADING SEMANTIC EMBEDDINGS from {semantic_path}')
-            self.semantic_vec = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
+            raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
+            # FIX: L2 Normalize so it operates on the same scale as ComplEx
+            import torch.nn.functional as F
+            self.semantic_vec = F.normalize(raw_sem, p=2, dim=1)
 
         # Matcher setup
         semantic_dim = self.semantic_vec.shape[1] if self.semantic_vec is not None else 0
@@ -319,11 +322,30 @@ class Trainer(object):
                 true = triple[2]
                 h_sym = symbol2id[self.escape_token(triple[0])]
                 t_sym = symbol2id[self.escape_token(true)]
-                query_batch = torch.LongTensor([[h_sym, t_sym]]).to(self.device)
+                
+                # Build a batch of [Head, Candidate] pairs
+                query_pairs = []
+                left_ents = []
+                right_ents = []
+
+                # Add all false candidates first
+                for cand in candidates:
+                    cand_esc = self.escape_token(cand)
+                    if cand_esc in symbol2id and cand_esc in self.ent2id:
+                        query_pairs.append([h_sym, symbol2id[cand_esc]])
+                        left_ents.append(self.ent2id[self.escape_token(triple[0])])
+                        right_ents.append(self.ent2id[cand_esc])
+                
+                # Append the true answer at the very end
+                query_pairs.append([h_sym, t_sym])
+                left_ents.append(self.ent2id[self.escape_token(triple[0])])
+                right_ents.append(self.ent2id[self.escape_token(true)])
+
+                query_batch = torch.LongTensor(query_pairs).to(self.device)
 
                 if meta:
-                    left_idx = torch.LongTensor([self.ent2id[self.escape_token(triple[0])]]).to(self.device)
-                    right_idx = torch.LongTensor([self.ent2id[self.escape_token(true)]]).to(self.device)
+                    left_idx = torch.LongTensor(left_ents).to(self.device)
+                    right_idx = torch.LongTensor(right_ents).to(self.device)
                     query_meta_single = self.get_meta(left_idx, right_idx)
                     query_meta_single = tuple(t.to(self.device, non_blocking=True) for t in query_meta_single)
                 else:
@@ -332,9 +354,11 @@ class Trainer(object):
                 query_sem = self.semantic_vec
                 support_sem = self.semantic_vec
 
+                # Pass the entire batch of candidates + the true answer to the matcher
                 scores = self.matcher(query_batch, support, query_meta=query_meta_single, support_meta=support_meta,
                                       query_sem=query_sem, support_sem=support_sem)
 
+                # The true answer is the last one appended, so it's at scores[-1]
                 rank = torch.sum(scores > scores[-1]).item() + 1
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
