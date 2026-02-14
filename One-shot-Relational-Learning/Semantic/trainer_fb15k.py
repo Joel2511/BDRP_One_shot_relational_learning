@@ -41,19 +41,33 @@ class Trainer(object):
         self.num_symbols = len(self.symbol2id.keys()) - 1
         self.pad_id = self.num_symbols
 
-        # Load semantic embeddings for NELL-ONE
+
+        # Load semantic embeddings for FB15K
         self.semantic_vec = None
         if 'fb15k' in self.dataset.lower() or self.semantic_type == 'bert':
-            # UPDATE THIS PATH to where you uploaded fb15k_semantic_anchors.npy
-            semantic_path = '/gpfs/workdir/anilj/fb15k_data/fb15k_semantic_anchors.npy'
+            semantic_path = '/gpfs/workdir/anilj/fb15k_data/data/fb15k_semantic_anchors.npy'
             logging.info(f'LOADING FB15K SEMANTIC EMBEDDINGS from {semantic_path}')
             
-            # Load raw 768D BERT vectors
+            # 1. Load the raw Entity vectors (Size: N_Entities x 768)
             raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
-            
-            # CRITICAL: L2 Normalize so BERT (scale ~10) doesn't crush ComplEx (scale ~0.1)
             import torch.nn.functional as F
-            self.semantic_vec = F.normalize(raw_sem, p=2, dim=1)
+            raw_sem = F.normalize(raw_sem, p=2, dim=1)
+
+            # 2. Calculate offsets to align with Global Symbol IDs
+            # (Global IDs: [0...Num_Rels-1] = Relations, [Num_Rels...End] = Entities)
+            rel2id = json.load(open(self.dataset + '/relation2ids'))
+            num_rels = len(rel2id)
+            num_ents = raw_sem.shape[0]
+
+            # 3. Create a Full Tensor (Relations + Entities + PAD) filled with zeros
+            # Size: [Total_Symbols + 1, 768]
+            full_sem = torch.zeros(self.num_symbols + 1, raw_sem.shape[1]).to(self.device)
+
+            # 4. Slot the semantic vectors into the correct range
+            # This ensures semantic[Global_ID] returns the correct vector
+            full_sem[num_rels : num_rels + num_ents] = raw_sem
+
+            self.semantic_vec = full_sem
 
         # Matcher setup
         semantic_dim = self.semantic_vec.shape[1] if self.semantic_vec is not None else 0
