@@ -45,7 +45,7 @@ class Trainer(object):
         # Load semantic embeddings for FB15K
         self.semantic_vec = None
         if 'fb15k' in self.dataset.lower() or self.semantic_type == 'bert':
-            semantic_path = '/gpfs/workdir/anilj/fb15k_data/data/fb15k_semantic_anchors.npy'
+            semantic_path = '/gpfs/workdir/anilj/fb15k_data/fb15k_semantic_anchors.npy'
             logging.info(f'LOADING FB15K SEMANTIC EMBEDDINGS from {semantic_path}')
             
             # 1. Load the raw Entity vectors (Size: N_Entities x 768)
