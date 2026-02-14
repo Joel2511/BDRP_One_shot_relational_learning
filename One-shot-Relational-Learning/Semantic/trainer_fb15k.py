@@ -130,47 +130,71 @@ class Trainer(object):
         self.symbol2vec = None
 
     def load_embed(self):
+        symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
-
-        logging.info('LOADING PRE-TRAINED EMBEDDINGS')
-        
+    
+        logging.info('LOADING PRE-TRAINED EMBEDDING')
+    
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
-
-        if self.embed_model in ['DistMult', 'TransE', 'RESCAL','TransH']:
-            ent_embed = np.loadtxt(ent_file)
-            rel_embed = np.loadtxt(rel_file)
-        
-        elif self.embed_model == 'ComplEx':
-            try:
-                ent_embed = np.loadtxt(ent_file)
-                rel_embed = np.loadtxt(rel_file)
-                logging.info("Loaded ComplEx as standard floats.")
-            except ValueError:
-                logging.info("Flattening complex strings...")
-                ent_embed_c = np.loadtxt(ent_file, dtype=np.complex64)
-                rel_embed_c = np.loadtxt(rel_file, dtype=np.complex64)
-                ent_embed = np.concatenate([ent_embed_c.real, ent_embed_c.imag], axis=-1)
-                rel_embed = np.concatenate([rel_embed_c.real, rel_embed_c.imag], axis=-1)
-
-        if self.embed_model == 'ComplEx':
-            eps = 1e-3
-            ent_embed = (ent_embed - np.mean(ent_embed, axis=1, keepdims=True)) / (np.std(ent_embed, axis=1, keepdims=True) + eps)
-            rel_embed = (rel_embed - np.mean(rel_embed, axis=1, keepdims=True)) / (np.std(rel_embed, axis=1, keepdims=True) + eps)
-
+    
+        ent_embed = np.loadtxt(ent_file)
+        rel_embed = np.loadtxt(rel_file)
+    
+        # Standardize structural channel
+        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
+        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
+    
+        # --- SEMANTIC INTEGRATION (LIKE MEDICAL) ---
+        if hasattr(self, 'use_semantic') and self.use_semantic:
+            sb_path = os.path.join(self.dataset, 'nell_semantic.npy')
+    
+            if os.path.exists(sb_path):
+                logging.info('INTEGRATING SEMANTIC CHANNEL')
+                sb = np.load(sb_path)
+    
+                sb = (sb - sb.mean(axis=0, keepdims=True)) / \
+                     (sb.std(axis=0, keepdims=True) + 1e-3)
+    
+                if sb.shape[1] != ent_embed.shape[1]:
+                    rng = np.random.RandomState(42)
+                    proj = rng.normal(
+                        0,
+                        1.0 / np.sqrt(sb.shape[1]),
+                        size=(sb.shape[1], ent_embed.shape[1])
+                    )
+                    sb = sb @ proj
+    
+                ent_embed = np.concatenate([ent_embed, sb], axis=1)
+    
+                rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
+                rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
+    
+                logging.info(f'Final embedding dim: {ent_embed.shape[1]}')
+            else:
+                logging.error(f'Semantic file not found at {sb_path}')
+    
+        # --- BUILD SYMBOL MAPPING SEQUENTIALLY ---
         embeddings = []
         i = 0
+    
         for key in rel2id.keys():
-            if key not in ['','OOV']:
-                embeddings.append(list(rel_embed[rel2id[key],:]))
+            if key not in ['', 'OOV']:
+                symbol_id[key] = i
+                embeddings.append(list(rel_embed[rel2id[key], :]))
                 i += 1
+    
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
-                embeddings.append(list(ent_embed[ent2id[key],:]))
+                symbol_id[key] = i
+                embeddings.append(list(ent_embed[ent2id[key], :]))
                 i += 1
+    
+        symbol_id['PAD'] = i
         embeddings.append(list(np.zeros((ent_embed.shape[1],))))
-        self.symbol2id = {**rel2id, **ent2id, 'PAD': i}
+    
+        self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
 
     # --- CONNECTION MATRIX ---
