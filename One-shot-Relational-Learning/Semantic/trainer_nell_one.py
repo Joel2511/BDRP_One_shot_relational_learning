@@ -299,8 +299,9 @@ class Trainer(object):
 
         rel2candidates = self.rel2candidates
         hits10, hits5, mrr = [], [], []
-
-        EVAL_BATCH_SIZE = 1024 
+        
+        # New List to store per-relation results
+        relation_results = {}
 
         for query_ in tqdm(test_tasks_all.keys(), desc="Evaluating Relations"):
             candidates = rel2candidates[query_]
@@ -309,6 +310,7 @@ class Trainer(object):
                               symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
 
             if meta:
+                # (Support Meta Code - unchanged)
                 support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
                 support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
                 support_meta = self.get_meta(support_left, support_right)
@@ -317,18 +319,22 @@ class Trainer(object):
                 support_meta = None
 
             support = torch.LongTensor(support_pairs).to(self.device)
+            
+            # Metric storage for THIS specific relation
+            rel_hits10 = []
+            rel_hits5 = []
+            rel_mrr = []
 
             for triple in test_tasks_all[query_][few:]:
                 true = triple[2]
                 h_sym = symbol2id[self.escape_token(triple[0])]
                 t_sym = symbol2id[self.escape_token(true)]
                 
-                # Build a batch of [Head, Candidate] pairs
+                # --- CANDIDATE GENERATION (Use the fix from before!) ---
                 query_pairs = []
                 left_ents = []
                 right_ents = []
 
-                # Add all false candidates first
                 for cand in candidates:
                     cand_esc = self.escape_token(cand)
                     if cand_esc in symbol2id and cand_esc in self.ent2id:
@@ -336,7 +342,6 @@ class Trainer(object):
                         left_ents.append(self.ent2id[self.escape_token(triple[0])])
                         right_ents.append(self.ent2id[cand_esc])
                 
-                # Append the true answer at the very end
                 query_pairs.append([h_sym, t_sym])
                 left_ents.append(self.ent2id[self.escape_token(triple[0])])
                 right_ents.append(self.ent2id[self.escape_token(true)])
@@ -344,7 +349,7 @@ class Trainer(object):
                 query_batch = torch.LongTensor(query_pairs).to(self.device)
 
                 if meta:
-                    query_meta_single = self.get_meta(left_ents, right_ents)
+                    query_meta_single = self.get_meta(left_ents, right_ents) # Using List fix
                     query_meta_single = tuple(t.to(self.device, non_blocking=True) for t in query_meta_single)
                 else:
                     query_meta_single = None
@@ -352,19 +357,38 @@ class Trainer(object):
                 query_sem = self.semantic_vec
                 support_sem = self.semantic_vec
 
-                # Pass the entire batch of candidates + the true answer to the matcher
                 scores = self.matcher(query_batch, support, query_meta=query_meta_single, support_meta=support_meta,
                                       query_sem=query_sem, support_sem=support_sem)
 
-                # The true answer is the last one appended, so it's at scores[-1]
                 rank = torch.sum(scores > scores[-1]).item() + 1
+                
+                # Update Global Metrics
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 mrr.append(1.0 / rank)
+                
+                # Update Per-Relation Metrics
+                rel_hits10.append(1.0 if rank <= 10 else 0.0)
+                rel_hits5.append(1.0 if rank <= 5 else 0.0)
+                rel_mrr.append(1.0 / rank)
 
-        logging.critical('HITS10: {:.3f}'.format(np.mean(hits10)))
-        logging.critical('HITS5: {:.3f}'.format(np.mean(hits5)))
-        logging.critical('MAP: {:.3f}'.format(np.mean(mrr)))
+            # Store average for this relation
+            relation_results[query_] = {
+                'hits10': np.mean(rel_hits10),
+                'hits5': np.mean(rel_hits5),
+                'mrr': np.mean(rel_mrr)
+            }
+
+        # --- LOG THE PER-RELATION BREAKDOWN ---
+        logging.critical("-" * 40)
+        logging.critical("PER-RELATION BREAKDOWN:")
+        for rel, res in relation_results.items():
+            logging.critical(f"Relation: {rel} | Hits@10: {res['hits10']:.3f} | MRR: {res['mrr']:.3f}")
+        logging.critical("-" * 40)
+
+        logging.critical('OVERALL HITS10: {:.3f}'.format(np.mean(hits10)))
+        logging.critical('OVERALL HITS5: {:.3f}'.format(np.mean(hits5)))
+        logging.critical('OVERALL MAP: {:.3f}'.format(np.mean(mrr)))
 
         self.matcher.train()
         return np.mean(hits10), np.mean(hits5), np.mean(mrr)
