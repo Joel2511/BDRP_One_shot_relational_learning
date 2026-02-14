@@ -11,6 +11,7 @@ class EmbedMatcher(nn.Module):
     def __init__(self, embed_dim, num_symbols, semantic_dim=0, use_pretrain=True, embed=None, dropout=0.2,
                  batch_size=64, process_steps=4, finetune=False, aggregate='max'):
         super(EmbedMatcher, self).__init__()
+
         self.embed_dim = embed_dim
         self.semantic_dim = semantic_dim
         self.pad_idx = num_symbols
@@ -18,7 +19,8 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.num_symbols = num_symbols
 
-        self.gcn_w = nn.Linear(2*self.embed_dim + self.semantic_dim, self.embed_dim)
+        input_dim = 2 * self.embed_dim + self.semantic_dim
+        self.gcn_w = nn.Linear(input_dim, self.embed_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.embed_dim))
         self.dropout = nn.Dropout(0.5)
 
@@ -32,28 +34,32 @@ class EmbedMatcher(nn.Module):
                 self.symbol_emb.weight.requires_grad = False
 
         d_model = self.embed_dim * 2
-        self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
+        self.support_encoder = SupportEncoder(d_model, 2 * d_model, dropout)
         self.query_encoder = QueryEncoder(d_model, process_steps)
 
     def neighbor_encoder(self, connections, num_neighbors, semantic=None):
-        num_neighbors = num_neighbors.unsqueeze(1)
-        relations = connections[:,:,0]
-        entities = connections[:,:,1]
+        relations = connections[:, :, 0]
+        entities = connections[:, :, 1]
 
         rel_embeds = self.dropout(self.symbol_emb(relations))
         ent_embeds = self.dropout(self.symbol_emb(entities))
 
-        if semantic is not None:
+        if self.semantic_dim > 0 and semantic is not None:
             semantic_embeds = semantic[entities]
             concat_embeds = torch.cat((rel_embeds, ent_embeds, semantic_embeds), dim=-1)
         else:
             concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
 
         out = self.gcn_w(concat_embeds) + self.gcn_b
-        out = torch.sum(out, dim=1) / num_neighbors
-        return out.tanh()
 
-    def forward(self, query, support, query_meta=None, support_meta=None, query_sem=None, support_sem=None):
+        num_neighbors = torch.clamp(num_neighbors, min=1).unsqueeze(1)
+        out = torch.sum(out, dim=1) / num_neighbors
+
+        return torch.tanh(out)
+
+    def forward(self, query, support, query_meta=None, support_meta=None,
+                query_sem=None, support_sem=None):
+
         if query_meta is not None:
             q_left_conn, q_left_deg, q_right_conn, q_right_deg = query_meta
             s_left_conn, s_left_deg, s_right_conn, s_right_deg = support_meta
@@ -62,6 +68,7 @@ class EmbedMatcher(nn.Module):
             query_right = self.neighbor_encoder(q_right_conn, q_right_deg, semantic=query_sem)
             support_left = self.neighbor_encoder(s_left_conn, s_left_deg, semantic=support_sem)
             support_right = self.neighbor_encoder(s_right_conn, s_right_deg, semantic=support_sem)
+
             query_neighbor = torch.cat((query_left, query_right), dim=-1)
             support_neighbor = torch.cat((support_left, support_right), dim=-1)
         else:
