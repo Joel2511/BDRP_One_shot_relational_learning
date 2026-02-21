@@ -111,62 +111,59 @@ class Trainer(object):
         self.symbol2id = symbol_id
         self.symbol2vec = None
 
-    def load_embed(self):
+   def load_embed(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
     
-        logging.info('LOADING PRE-TRAINED EMBEDDING')
+        logging.info('LOADING PRE-TRAINED EMBEDDINGS')
     
+        # Load structural embeddings
         ent_file = self.dataset + '/entity2vec.' + self.embed_model
         rel_file = self.dataset + '/relation2vec.' + self.embed_model
-    
+        
         ent_embed = np.loadtxt(ent_file)
         rel_embed = np.loadtxt(rel_file)
     
-        # Standardize structural channel
-        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
-        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
+        # 1. Standardize structural channel
+        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-5)
+        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-5)
     
-        # --- SEMANTIC INTEGRATION (LIKE MEDICAL) ---
+        # 2. Integrate Semantic Channel (Alignment Fix)
         if hasattr(self, 'use_semantic') and self.use_semantic:
-            sb_path = os.path.join(self.dataset, 'nell_semantic.npy')
-    
+            sb_path = '/gpfs/workdir/anilj/nell_data/nell_one_semantic_anchors.npy'
             if os.path.exists(sb_path):
                 logging.info('INTEGRATING SEMANTIC CHANNEL')
                 sb = np.load(sb_path)
     
-                sb = (sb - sb.mean(axis=0, keepdims=True)) / \
-                     (sb.std(axis=0, keepdims=True) + 1e-3)
+                # Unified Scaling: Standardize semantics like structural data
+                sb = (sb - np.mean(sb)) / (np.std(sb) + 1e-5)
     
+                # Dimensionality Match: Project 768 to match ent_embed.shape[1]
                 if sb.shape[1] != ent_embed.shape[1]:
+                    # Use a stable seed for reproducible results
                     rng = np.random.RandomState(42)
-                    proj = rng.normal(
-                        0,
-                        1.0 / np.sqrt(sb.shape[1]),
-                        size=(sb.shape[1], ent_embed.shape[1])
-                    )
+                    proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]), 
+                                     size=(sb.shape[1], ent_embed.shape[1]))
                     sb = sb @ proj
     
+                # Concatenate: Results in a unified vector (e.g., 200d structural + 200d semantic)
                 ent_embed = np.concatenate([ent_embed, sb], axis=1)
     
+                # Pad Relations: Relations need same width but semantics are zeroed for relations
                 rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
+                
+                logging.info(f'Final Unified Embedding Dim: {ent_embed.shape[1]}')
     
-                logging.info(f'Final embedding dim: {ent_embed.shape[1]}')
-            else:
-                logging.error(f'Semantic file not found at {sb_path}')
-    
-        # --- BUILD SYMBOL MAPPING SEQUENTIALLY ---
+        # 3. Map to Symbol ID sequentially
         embeddings = []
         i = 0
-    
         for key in rel2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
                 embeddings.append(list(rel_embed[rel2id[key], :]))
                 i += 1
-    
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
