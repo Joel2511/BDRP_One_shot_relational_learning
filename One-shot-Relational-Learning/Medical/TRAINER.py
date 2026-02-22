@@ -312,9 +312,16 @@ class Trainer(object):
         test_tasks = self.load_tasks(task_path)
     
         for rel_name, triples in test_tasks.items():
-            if len(triples) < 2: 
+            if len(triples) < 2:
                 continue
-            candidates = self.rel2candidates.get(rel_name, [])
+    
+            # get candidate tails for this relation
+            raw_candidates = self.rel2candidates.get(rel_name, [])
+            if not raw_candidates:
+                logging.warning(f"No candidates for relation {rel_name}; skipped.")
+                continue
+    
+            # build support set
             support_triples = triples[:self.few]
             support_pairs = [[self.symbol2id[t[0]], self.symbol2id[t[2]]] for t in support_triples]
     
@@ -325,22 +332,47 @@ class Trainer(object):
             support = torch.LongTensor(support_pairs).to(self.device)
     
             for triple in triples[self.few:]:
-                query_pair = [[self.symbol2id[triple[0]], self.symbol2id[triple[2]]]]
-                query = torch.LongTensor(query_pair).to(self.device)
+                # collect valid candidate list
+                valid_cands = []
+                for ent in raw_candidates:
+                    # filter true match presence in graph
+                    if ent == triple[2]:
+                        valid_cands.append(ent)
+                    else:
+                        # if present in graph but not forbidden
+                        if (triple[0] in self.e1rel_e2 and
+                            rel_name in self.e1rel_e2[triple[0]] and
+                            ent in self.e1rel_e2[triple[0]][rel_name]):
+                            continue
+                        valid_cands.append(ent)
+    
+                if not valid_cands:
+                    logging.warning(f"No valid candidates for query {triple} under relation {rel_name}")
+                    continue  # skip this query, no ranking possible
+    
+                # build batch
+                batch_syms = [[self.symbol2id[triple[0]], self.symbol2id[c]] for c in valid_cands]
+                query = torch.LongTensor(batch_syms).to(self.device)
+    
                 query_meta = None
                 if meta:
-                    query_left = [self.ent2id[triple[0]]]
-                    query_right = [self.ent2id[triple[2]]]
+                    query_left = [self.ent2id[triple[0]]]*len(valid_cands)
+                    query_right = [self.ent2id[c]   for c in valid_cands]
                     query_meta = tuple(t.to(self.device) for t in self.get_meta(query_left, query_right))
     
+                # score candidates
                 scores = self.matcher(query, support, query_meta, support_meta)
     
-                # --- SKIP EMPTY CANDIDATE SETS ---
                 if scores.numel() == 0:
-                    logging.warning(f"Skipping empty candidate set for task {rel_name}")
+                    logging.warning(f"Empty scores for relation {rel_name} with query {triple}")
                     continue
     
-                rank = (scores > scores[-1]).sum().item() + 1
+                true_idx = valid_cands.index(triple[2])
+                true_score = scores[true_idx].item()
+    
+                # compute rank
+                rank = (scores > true_score).sum().item() + 1
+    
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
