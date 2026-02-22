@@ -30,7 +30,7 @@ def read_options():
     # --- GATING & SEMANTIC HYPERPARAMETERS ---
     parser.add_argument("--knn_k", default=10, type=int, help="k-NN neighbors")
     parser.add_argument("--use_semantic", action='store_true', help="Use PubMedBERT")
-    parser.add_argument("--semantic_type", type=str, default='pubmedbert', choices=['sapbert', 'pubmedbert'])
+    parser.add_argument("--semantic_type", type=str, default='pubmedbert', choices=['sapbert', 'pubmedbert', 'luke', 'bert', 'roberta'])
     parser.add_argument("--gate_lr", default=0.001, type=float, help="Learning rate for gating layer")
 
     # --- DATASET FILTERING ---
