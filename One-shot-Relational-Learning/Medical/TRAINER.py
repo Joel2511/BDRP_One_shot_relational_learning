@@ -91,6 +91,10 @@ class Trainer(object):
         ], weight_decay=self.weight_decay)
         self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
     
+        # --- CLAMP NEIGHBORS TO DATASET SIZE ---
+        self.max_neighbor = min(self.max_neighbor, self.num_ents)
+        self.knn_k = min(self.knn_k, self.max_neighbor)
+    
         # --- CONNECTION MATRIX ---
         self.connections = None
         self.e1_degrees_tensor = None
@@ -101,7 +105,6 @@ class Trainer(object):
         self.writer = None if self.test else SummaryWriter('logs/' + self.prefix)
     
         print(f"Trainer initialized on {self.device}, {torch.cuda.device_count()} GPUs.")
-
     # ---------------- SYMBOLS / EMBEDDINGS ----------------
     def load_symbol2id(self):
         symbol_id = {}
@@ -304,22 +307,23 @@ class Trainer(object):
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         hits10, hits5, hits1, mrr = [], [], [], []
-
+    
         task_path = os.path.join(self.dataset, self.val_file if mode == 'dev' else self.test_file)
         test_tasks = self.load_tasks(task_path)
-
+    
         for rel_name, triples in test_tasks.items():
-            if len(triples) < 2: continue
+            if len(triples) < 2: 
+                continue
             candidates = self.rel2candidates.get(rel_name, [])
             support_triples = triples[:self.few]
             support_pairs = [[self.symbol2id[t[0]], self.symbol2id[t[2]]] for t in support_triples]
-
+    
             support_left = [self.ent2id[t[0]] for t in support_triples]
             support_right = [self.ent2id[t[2]] for t in support_triples]
             support_meta = self.get_meta(support_left, support_right)
             support_meta = tuple(t.to(self.device) for t in support_meta)
             support = torch.LongTensor(support_pairs).to(self.device)
-
+    
             for triple in triples[self.few:]:
                 query_pair = [[self.symbol2id[triple[0]], self.symbol2id[triple[2]]]]
                 query = torch.LongTensor(query_pair).to(self.device)
@@ -328,14 +332,20 @@ class Trainer(object):
                     query_left = [self.ent2id[triple[0]]]
                     query_right = [self.ent2id[triple[2]]]
                     query_meta = tuple(t.to(self.device) for t in self.get_meta(query_left, query_right))
-
+    
                 scores = self.matcher(query, support, query_meta, support_meta)
+    
+                # --- SKIP EMPTY CANDIDATE SETS ---
+                if scores.numel() == 0:
+                    logging.warning(f"Skipping empty candidate set for task {rel_name}")
+                    continue
+    
                 rank = (scores > scores[-1]).sum().item() + 1
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
-
+    
         logging.critical(f'OVERALL HITS@10: {np.mean(hits10):.3f}, MRR: {np.mean(mrr):.3f}')
         self.matcher.train()
         return np.mean(hits10), np.mean(hits5), np.mean(mrr), None
