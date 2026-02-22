@@ -312,16 +312,17 @@ class Trainer(object):
         test_tasks = self.load_tasks(task_path)
     
         for rel_name, triples in test_tasks.items():
-            if len(triples) < 2:
+            if len(triples) < 1:
+                logging.warning(f"No triples for relation {rel_name}; skipped.")
                 continue
     
-            # get candidate tails for this relation
+            # Candidates for this relation
             raw_candidates = self.rel2candidates.get(rel_name, [])
             if not raw_candidates:
                 logging.warning(f"No candidates for relation {rel_name}; skipped.")
                 continue
     
-            # build support set
+            # Build support set
             support_triples = triples[:self.few]
             support_pairs = [[self.symbol2id[t[0]], self.symbol2id[t[2]]] for t in support_triples]
     
@@ -331,38 +332,37 @@ class Trainer(object):
             support_meta = tuple(t.to(self.device) for t in support_meta)
             support = torch.LongTensor(support_pairs).to(self.device)
     
+            # Per-relation metrics
+            rel_hits10, rel_hits5, rel_hits1, rel_mrr = [], [], [], []
+    
             for triple in triples[self.few:]:
-                # collect valid candidate list
+                # Build valid candidate list, always include true tail
                 valid_cands = []
                 for ent in raw_candidates:
-                    # filter true match presence in graph
                     if ent == triple[2]:
                         valid_cands.append(ent)
                     else:
-                        # if present in graph but not forbidden
                         if (triple[0] in self.e1rel_e2 and
                             rel_name in self.e1rel_e2[triple[0]] and
                             ent in self.e1rel_e2[triple[0]][rel_name]):
                             continue
                         valid_cands.append(ent)
     
-                if not valid_cands:
-                    logging.warning(f"No valid candidates for query {triple} under relation {rel_name}")
-                    continue  # skip this query, no ranking possible
+                if triple[2] not in valid_cands:
+                    valid_cands.append(triple[2])
     
-                # build batch
+                # Build batch
                 batch_syms = [[self.symbol2id[triple[0]], self.symbol2id[c]] for c in valid_cands]
                 query = torch.LongTensor(batch_syms).to(self.device)
     
                 query_meta = None
                 if meta:
-                    query_left = [self.ent2id[triple[0]]]*len(valid_cands)
-                    query_right = [self.ent2id[c]   for c in valid_cands]
+                    query_left = [self.ent2id[triple[0]]] * len(valid_cands)
+                    query_right = [self.ent2id[c] for c in valid_cands]
                     query_meta = tuple(t.to(self.device) for t in self.get_meta(query_left, query_right))
     
-                # score candidates
+                # Score candidates
                 scores = self.matcher(query, support, query_meta, support_meta)
-    
                 if scores.numel() == 0:
                     logging.warning(f"Empty scores for relation {rel_name} with query {triple}")
                     continue
@@ -370,18 +370,30 @@ class Trainer(object):
                 true_idx = valid_cands.index(triple[2])
                 true_score = scores[true_idx].item()
     
-                # compute rank
+                # Compute rank
                 rank = (scores > true_score).sum().item() + 1
     
+                # Append metrics
                 hits10.append(1.0 if rank <= 10 else 0.0)
                 hits5.append(1.0 if rank <= 5 else 0.0)
                 hits1.append(1.0 if rank <= 1 else 0.0)
                 mrr.append(1.0 / rank)
     
-        logging.critical(f'OVERALL HITS@10: {np.mean(hits10):.3f}, MRR: {np.mean(mrr):.3f}')
+                rel_hits10.append(1.0 if rank <= 10 else 0.0)
+                rel_hits5.append(1.0 if rank <= 5 else 0.0)
+                rel_hits1.append(1.0 if rank <= 1 else 0.0)
+                rel_mrr.append(1.0 / rank)
+    
+            logging.critical(f'Relation {rel_name}: Hits@10={np.mean(rel_hits10):.3f}, '
+                             f'Hits@5={np.mean(rel_hits5):.3f}, Hits@1={np.mean(rel_hits1):.3f}, '
+                             f'MRR={np.mean(rel_mrr):.3f}')
+    
+        logging.critical(f'OVERALL: Hits@10={np.mean(hits10):.3f}, Hits@5={np.mean(hits5):.3f}, '
+                         f'Hits@1={np.mean(hits1):.3f}, MRR={np.mean(mrr):.3f}')
+    
         self.matcher.train()
-        return np.mean(hits10), np.mean(hits5), np.mean(mrr), None
-
+        return np.mean(hits10), np.mean(hits5), np.mean(hits1), np.mean(mrr)
+        
     def load_tasks(self, file_path):
         if file_path.endswith('.json'):
             return json.load(open(file_path))
