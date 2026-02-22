@@ -16,7 +16,7 @@ from matcher_nell_one import EmbedMatcher
 from tensorboardX import SummaryWriter
 
 class Trainer(object):
-    
+
     def __init__(self, arg):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
@@ -48,7 +48,6 @@ class Trainer(object):
             logging.info(f'LOADING SEMANTIC EMBEDDINGS from {semantic_path}')
             raw_sem = torch.from_numpy(np.load(semantic_path)).float().to(self.device)
             # FIX: L2 Normalize so it operates on the same scale as ComplEx
-            import torch.nn.functional as F
             self.semantic_vec = F.normalize(raw_sem, p=2, dim=1)
 
         # Matcher setup
@@ -110,8 +109,8 @@ class Trainer(object):
         symbol_id['PAD'] = i
         self.symbol2id = symbol_id
         self.symbol2vec = None
-
-   def load_embed(self):
+        
+    def load_embed(self):
         symbol_id = {}
         rel2id = json.load(open(self.dataset + '/relation2ids'))
         ent2id = json.load(open(self.dataset + '/ent2ids'))
@@ -136,21 +135,18 @@ class Trainer(object):
                 logging.info('INTEGRATING SEMANTIC CHANNEL')
                 sb = np.load(sb_path)
     
-                # Unified Scaling: Standardize semantics like structural data
+                # Unified Scaling
                 sb = (sb - np.mean(sb)) / (np.std(sb) + 1e-5)
     
                 # Dimensionality Match: Project 768 to match ent_embed.shape[1]
                 if sb.shape[1] != ent_embed.shape[1]:
-                    # Use a stable seed for reproducible results
                     rng = np.random.RandomState(42)
                     proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]), 
                                      size=(sb.shape[1], ent_embed.shape[1]))
                     sb = sb @ proj
     
-                # Concatenate: Results in a unified vector (e.g., 200d structural + 200d semantic)
+                # Concatenate: Unified hybrid representation
                 ent_embed = np.concatenate([ent_embed, sb], axis=1)
-    
-                # Pad Relations: Relations need same width but semantics are zeroed for relations
                 rel_padding = np.zeros((rel_embed.shape[0], sb.shape[1]))
                 rel_embed = np.concatenate([rel_embed, rel_padding], axis=1)
                 
@@ -176,8 +172,6 @@ class Trainer(object):
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
 
-
-    # --- CONNECTION MATRIX ---
     def build_connection(self, max_=100):
         self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
         self.e1_rele2 = defaultdict(list)
@@ -206,7 +200,6 @@ class Trainer(object):
                 self.connections[id_, idx, 1] = _[1]
         return degrees
 
-    # --- META EXTRACTION ---
     def get_meta(self, left, right):
         left_idx = torch.LongTensor(left).to(self.device)
         right_idx = torch.LongTensor(right).to(self.device)
@@ -217,7 +210,6 @@ class Trainer(object):
         right_degrees = self.e1_degrees_tensor[right_idx]
         return (left_connections, left_degrees, right_connections, right_degrees)
 
-    # --- TRAINING LOOP ---
     def train(self):
         logging.info('START TRAINING...')
         best_hits10 = 0.0
@@ -235,17 +227,12 @@ class Trainer(object):
             query   = torch.LongTensor(query).pin_memory().to(self.device, non_blocking=True)
             false   = torch.LongTensor(false).pin_memory().to(self.device, non_blocking=True)
 
-            query_sem = self.semantic_vec
-            support_sem = self.semantic_vec
-
             if self.no_meta:
-                query_scores = self.matcher(query, support, query_sem=query_sem, support_sem=support_sem)
-                false_scores = self.matcher(false, support, query_sem=query_sem, support_sem=support_sem)
+                query_scores = self.matcher(query, support)
+                false_scores = self.matcher(false, support)
             else:
-                query_scores = self.matcher(query, support, query_meta=query_meta, support_meta=support_meta,
-                                            query_sem=query_sem, support_sem=support_sem)
-                false_scores = self.matcher(false, support, query_meta=false_meta, support_meta=support_meta,
-                                            query_sem=query_sem, support_sem=support_sem)
+                query_scores = self.matcher(query, support, query_meta=query_meta, support_meta=support_meta)
+                false_scores = self.matcher(false, support, query_meta=false_meta, support_meta=support_meta)
 
             margin_ = query_scores - false_scores
             margins.append(margin_.mean().item())
@@ -262,14 +249,9 @@ class Trainer(object):
             if self.batch_nums % self.log_every == 0:
                 avg_loss = np.mean(losses)
                 logging.critical(f"Batch {self.batch_nums}: Loss={avg_loss:.4f}")
-                if self.writer:
-                    self.writer.add_scalar('Avg_batch_loss', avg_loss, self.batch_nums)
 
             if self.batch_nums % self.eval_every == 0 and self.batch_nums > 0:
                 hits10, hits5, mrr = self.eval(meta=self.meta)
-                if self.writer:
-                    self.writer.add_scalar('HITS10', hits10, self.batch_nums)
-                    self.writer.add_scalar('MAP', mrr, self.batch_nums)
                 self.save()
                 if hits10 > best_hits10:
                     self.save(self.save_path + '_bestHits10')
@@ -279,13 +261,10 @@ class Trainer(object):
             self.scheduler.step()
             
             if self.batch_nums >= self.max_batches:
-                logging.critical(f"Max batches ({self.max_batches}) reached. Running final evaluation.")
-                hits10, hits5, mrr = self.eval(meta=self.meta)
-                logging.critical(f"FINAL DEV RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
+                self.eval(meta=self.meta)
                 self.save()
                 break
 
-    # --- SAVE / LOAD ---
     def save(self, path="models/initial"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         if isinstance(self.matcher, torch.nn.DataParallel):
@@ -300,7 +279,6 @@ class Trainer(object):
         else:
             self.matcher.load_state_dict(state)
 
-    # --- EVALUATION ---
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         symbol2id = self.symbol2id
@@ -308,54 +286,37 @@ class Trainer(object):
 
         logging.info('EVALUATING ON %s DATA' % mode.upper())
         if mode == 'dev':
-            dev_path_std = os.path.join(self.dataset, 'validation_tasks.json')
-            dev_path_alt = os.path.join(self.dataset, 'dev_tasks.json')
-            if os.path.exists(dev_path_std):
-                test_tasks_all = json.load(open(dev_path_std))
-            elif os.path.exists(dev_path_alt):
-                test_tasks_all = json.load(open(dev_path_alt))
-            else:
-                raise FileNotFoundError(f"No dev tasks file found in {self.dataset}")
+            dev_path = os.path.join(self.dataset, 'dev_tasks.json')
+            if not os.path.exists(dev_path): dev_path = os.path.join(self.dataset, 'validation_tasks.json')
+            test_tasks_all = json.load(open(dev_path))
         else:
             test_tasks_all = json.load(open(os.path.join(self.dataset, 'test_tasks.json')))
 
         rel2candidates = self.rel2candidates
         hits10, hits5, mrr = [], [], []
-        
-        # New List to store per-relation results
         relation_results = {}
 
-        for query_ in tqdm(test_tasks_all.keys(), desc="Evaluating Relations"):
+        for query_ in tqdm(test_tasks_all.keys(), desc="Evaluating"):
             candidates = rel2candidates[query_]
             support_triples = test_tasks_all[query_][:few]
-            support_pairs = [[symbol2id[self.escape_token(triple[0])],
-                              symbol2id[self.escape_token(triple[2])]] for triple in support_triples]
+            support_pairs = [[symbol2id[self.escape_token(t[0])], symbol2id[self.escape_token(t[2])]] for t in support_triples]
 
             if meta:
-                # (Support Meta Code - unchanged)
-                support_left = [self.ent2id[self.escape_token(triple[0])] for triple in support_triples]
-                support_right = [self.ent2id[self.escape_token(triple[2])] for triple in support_triples]
-                support_meta = self.get_meta(support_left, support_right)
-                support_meta = tuple(t.to(self.device, non_blocking=True) for t in support_meta)
+                support_left = [self.ent2id[self.escape_token(t[0])] for t in support_triples]
+                support_right = [self.ent2id[self.escape_token(t[2])] for t in support_triples]
+                support_meta = tuple(t.to(self.device) for t in self.get_meta(support_left, support_right))
             else:
                 support_meta = None
 
             support = torch.LongTensor(support_pairs).to(self.device)
-            
-            # Metric storage for THIS specific relation
-            rel_hits10 = []
-            rel_hits5 = []
-            rel_mrr = []
+            rel_hits10, rel_mrr = [], []
 
             for triple in test_tasks_all[query_][few:]:
-                true = triple[2]
+                true_t = triple[2]
                 h_sym = symbol2id[self.escape_token(triple[0])]
-                t_sym = symbol2id[self.escape_token(true)]
+                t_sym = symbol2id[self.escape_token(true_t)]
                 
-                # --- CANDIDATE GENERATION (Use the fix from before!) ---
-                query_pairs = []
-                left_ents = []
-                right_ents = []
+                query_pairs, left_ents, right_ents = [], [], []
 
                 for cand in candidates:
                     cand_esc = self.escape_token(cand)
@@ -366,91 +327,45 @@ class Trainer(object):
                 
                 query_pairs.append([h_sym, t_sym])
                 left_ents.append(self.ent2id[self.escape_token(triple[0])])
-                right_ents.append(self.ent2id[self.escape_token(true)])
+                right_ents.append(self.ent2id[self.escape_token(true_t)])
 
                 query_batch = torch.LongTensor(query_pairs).to(self.device)
+                q_meta = tuple(t.to(self.device) for t in self.get_meta(left_ents, right_ents)) if meta else None
 
-                if meta:
-                    query_meta_single = self.get_meta(left_ents, right_ents) # Using List fix
-                    query_meta_single = tuple(t.to(self.device, non_blocking=True) for t in query_meta_single)
-                else:
-                    query_meta_single = None
-
-                query_sem = self.semantic_vec
-                support_sem = self.semantic_vec
-
-                scores = self.matcher(query_batch, support, query_meta=query_meta_single, support_meta=support_meta,
-                                      query_sem=query_sem, support_sem=support_sem)
+                with torch.no_grad():
+                    scores = self.matcher(query_batch, support, query_meta=q_meta, support_meta=support_meta)
 
                 rank = torch.sum(scores > scores[-1]).item() + 1
-                
-                # Update Global Metrics
                 hits10.append(1.0 if rank <= 10 else 0.0)
-                hits5.append(1.0 if rank <= 5 else 0.0)
                 mrr.append(1.0 / rank)
-                
-                # Update Per-Relation Metrics
                 rel_hits10.append(1.0 if rank <= 10 else 0.0)
-                rel_hits5.append(1.0 if rank <= 5 else 0.0)
                 rel_mrr.append(1.0 / rank)
 
-            # Store average for this relation
-            relation_results[query_] = {
-                'hits10': np.mean(rel_hits10),
-                'hits5': np.mean(rel_hits5),
-                'mrr': np.mean(rel_mrr)
-            }
+            relation_results[query_] = {'hits10': np.mean(rel_hits10), 'mrr': np.mean(rel_mrr)}
 
-        # --- LOG THE PER-RELATION BREAKDOWN ---
-        logging.critical("-" * 40)
-        logging.critical("PER-RELATION BREAKDOWN:")
+        logging.critical("-" * 30)
         for rel, res in relation_results.items():
-            logging.critical(f"Relation: {rel} | Hits@10: {res['hits10']:.3f} | MRR: {res['mrr']:.3f}")
-        logging.critical("-" * 40)
-
-        logging.critical('OVERALL HITS10: {:.3f}'.format(np.mean(hits10)))
-        logging.critical('OVERALL HITS5: {:.3f}'.format(np.mean(hits5)))
-        logging.critical('OVERALL MAP: {:.3f}'.format(np.mean(mrr)))
-
+            logging.critical(f"Rel: {rel} | H@10: {res['hits10']:.3f} | MRR: {res['mrr']:.3f}")
+        logging.critical(f"OVERALL HITS@10: {np.mean(hits10):.3f} | MRR: {np.mean(mrr):.3f}")
         self.matcher.train()
-        return np.mean(hits10), np.mean(hits5), np.mean(mrr)
-
-    def test_(self):
-        self.load()
-        logging.info('Pre-trained model loaded')
-        self.eval(mode='dev', meta=self.meta)
-        self.eval(mode='test', meta=self.meta)
+        return np.mean(hits10), 0, np.mean(mrr)
 
     def escape_token(self, token):
         return token.replace(" ", "_")
 
-
 if __name__ == '__main__':
     args = read_options()
-
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
     formatter = logging.Formatter('%(asctime)s %(levelname)s: - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
     os.makedirs('./logs_', exist_ok=True)
     fh = logging.FileHandler('./logs_/log-{}.txt'.format(args.prefix))
-    fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
     ch.setFormatter(formatter)
+    logger.addHandler(ch); logger.addHandler(fh)
 
-    logger.addHandler(ch)
-    logger.addHandler(fh)
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.benchmark = True
-
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     trainer = Trainer(args)
-    if args.test:
-        trainer.test_()
-    else:
-        trainer.train()
+    if args.test: trainer.test_()
+    else: trainer.train()
