@@ -20,17 +20,27 @@ class Trainer(object):
         super().__init__()
         for k, v in vars(args).items():
             setattr(self, k, v)
-
+    
         # --- DEVICE ---
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if self.device.type == "cpu":
             logging.warning("No CUDA found. Running on CPU.")
         torch.backends.cudnn.benchmark = True
-
+    
         # --- METADATA ---
         self.meta = not self.no_meta
         self.use_pretrain = not self.random_embed
-
+    
+        # --- DATASET FILES ---
+        self.train_file = 'train_tasks.json'
+        self.val_file = 'validation_tasks.json'
+        self.test_file = 'test_tasks.json'
+    
+        self.ent2id = json.load(open(os.path.join(self.dataset, 'ent2ids')))
+        self.num_ents = len(self.ent2id)
+        self.rel2candidates = json.load(open(os.path.join(self.dataset, 'rel2candidates.json')))
+        self.e1rel_e2 = json.load(open(os.path.join(self.dataset, 'e1rel_e2.json')))
+    
         # --- LOAD SYMBOLS / EMBEDDINGS ---
         logging.info("LOADING SYMBOLS AND EMBEDDINGS")
         if self.test or self.random_embed:
@@ -38,10 +48,18 @@ class Trainer(object):
             self.use_pretrain = False
         else:
             self.load_embed()
-
+    
+        # --- SEMANTIC .NPY PATH (NELL-One) ---
+        if hasattr(self, 'use_semantic') and self.use_semantic:
+            self.semantic_path = os.path.join(
+                os.path.dirname(self.dataset), f"{self.prefix}_anchors.npy"
+            )
+            if not os.path.exists(self.semantic_path):
+                logging.warning(f"Semantic .npy not found at {self.semantic_path}")
+    
         self.num_symbols = len(self.symbol2id) - 1
         self.pad_id = self.num_symbols
-
+    
         # --- MATCHER ---
         self.matcher = EmbedMatcher(
             embed_dim=self.embed_dim,
@@ -58,7 +76,7 @@ class Trainer(object):
         if torch.cuda.device_count() > 1:
             self.matcher = nn.DataParallel(self.matcher)
         self.matcher.to(self.device)
-
+    
         # --- OPTIMIZER with Gate LR ---
         if torch.cuda.device_count() > 1:
             gate_params = list(self.matcher.module.gate_layer.parameters())
@@ -66,27 +84,22 @@ class Trainer(object):
         else:
             gate_params = list(self.matcher.gate_layer.parameters())
             base_params = [p for n, p in self.matcher.named_parameters() if 'gate_layer' not in n]
-
+    
         self.optim = optim.Adam([
             {'params': base_params, 'lr': self.lr},
             {'params': gate_params, 'lr': self.lr * 0.1}
         ], weight_decay=self.weight_decay)
         self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
-
-        # --- DATASET FILES ---
-        self.ent2id = json.load(open(os.path.join(self.dataset, 'ent2ids')))
-        self.num_ents = len(self.ent2id)
-        self.rel2candidates = json.load(open(os.path.join(self.dataset, 'rel2candidates.json')))
-        self.e1rel_e2 = json.load(open(os.path.join(self.dataset, 'e1rel_e2.json')))
-
+    
+        # --- CONNECTION MATRIX ---
         self.connections = None
         self.e1_degrees_tensor = None
         self.build_connection_matrix(max_=self.max_neighbor)
-
+    
         # --- LOGGER & TENSORBOARD ---
         self.batch_nums = 0
         self.writer = None if self.test else SummaryWriter('logs/' + self.prefix)
-
+    
         print(f"Trainer initialized on {self.device}, {torch.cuda.device_count()} GPUs.")
 
     # ---------------- SYMBOLS / EMBEDDINGS ----------------
@@ -110,20 +123,20 @@ class Trainer(object):
     def load_embed(self):
         rel2id = json.load(open(os.path.join(self.dataset, 'relation2ids')))
         ent2id = json.load(open(os.path.join(self.dataset, 'ent2ids')))
-
+    
         ent_file = os.path.join(self.dataset, f'entity2vec.{self.embed_model}')
         rel_file = os.path.join(self.dataset, f'relation2vec.{self.embed_model}')
-
+    
         ent_embed = np.loadtxt(ent_file)
         rel_embed = np.loadtxt(rel_file)
-
-        # STANDARDIZE
+    
+        # --- STANDARDIZE ---
         ent_embed = (ent_embed - ent_embed.mean()) / (ent_embed.std() + 1e-3)
         rel_embed = (rel_embed - rel_embed.mean()) / (rel_embed.std() + 1e-3)
-
-        # SEMANTIC CHANNEL
-        if self.use_semantic:
-            sb_file = os.path.join(os.path.dirname(self.dataset), f'{self.prefix}_anchors.npy')
+    
+        # --- SEMANTIC CHANNEL ---
+        if getattr(self, 'use_semantic', False):
+            sb_file = getattr(self, 'semantic_path', os.path.join(os.path.dirname(self.dataset), f'{self.prefix}_anchors.npy'))
             if os.path.exists(sb_file):
                 sb = np.load(sb_file)
                 sb = (sb - sb.mean(axis=0, keepdims=True)) / (sb.std(axis=0, keepdims=True) + 1e-3)
@@ -136,23 +149,27 @@ class Trainer(object):
                 logging.info(f'Unified embedding dim: {ent_embed.shape[1]}')
             else:
                 logging.warning(f'Semantic .npy not found at {sb_file}')
-
-        # FINAL SYMBOL EMBEDDINGS
+    
+        # --- FINAL SYMBOL EMBEDDINGS ---
         symbol_id = {}
         embeddings = []
         i = 0
+    
         for key in rel2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
                 i += 1
                 embeddings.append(list(rel_embed[rel2id[key]]))
+    
         for key in ent2id.keys():
             if key not in ['', 'OOV']:
                 symbol_id[key] = i
                 i += 1
                 embeddings.append(list(ent_embed[ent2id[key]]))
+    
         symbol_id['PAD'] = i
         embeddings.append(np.zeros(ent_embed.shape[1]))
+    
         self.symbol2id = symbol_id
         self.symbol2vec = np.array(embeddings)
 
