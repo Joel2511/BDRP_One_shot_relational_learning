@@ -257,18 +257,12 @@ class Trainer(object):
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
 
-            # ADVERSARIAL NEGATIVE SAMPLING
-            adv_temperature = 1.0
-            neg_num = false_scores.size(0) // query_scores.size(0)
-            f_scores = false_scores.view(query_scores.size(0), neg_num)
-            adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
-            adv_false_scores = (adv_weights * f_scores).sum(dim=-1)
-
             loss = (F.relu(self.margin - (query_scores - false_scores)) * task_weight).mean()
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
+
 
             if self.batch_nums % self.log_every == 0:
                 logging.critical(f"Batch {self.batch_nums}: Loss={np.mean(losses):.4f} (Task {rel_name}, Weight {task_weight:.1f})")
