@@ -264,7 +264,7 @@ class Trainer(object):
             adv_weights = F.softmax(f_scores * adv_temperature, dim=-1)
             adv_false_scores = (adv_weights * f_scores).sum(dim=-1)
 
-            loss = (F.relu(self.margin - (query_scores - adv_false_scores)) * task_weight).mean()
+            loss = (F.relu(self.margin - (query_scores - false_scores)) * task_weight).mean()
             losses.append(loss.item())
             self.optim.zero_grad()
             loss.backward()
