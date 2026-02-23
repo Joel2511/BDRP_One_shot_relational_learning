@@ -13,7 +13,7 @@ from tensorboardX import SummaryWriter
 
 from args import read_options
 from data_loader import *
-from MATCHER import EmbedMatcher
+from MATCHER_EXP import EmbedMatcher
 
 class Trainer(object):
     def __init__(self, args):
