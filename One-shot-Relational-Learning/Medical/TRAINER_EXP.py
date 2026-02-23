@@ -228,9 +228,11 @@ class Trainer(object):
                 if not line:
                     continue
                 try:
-                    clean_data.append(json.loads(line))
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        clean_data.append(parsed)
                 except json.JSONDecodeError:
-                    continue  # silently skip bad lines; NELL-One unaffected
+                    continue
         for data in clean_data:
             rel = data.get('relation') or data.get('r')
             if rel: relation_freq[rel] += 1
