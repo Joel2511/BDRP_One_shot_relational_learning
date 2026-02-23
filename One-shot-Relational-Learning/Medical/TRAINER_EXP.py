@@ -219,11 +219,21 @@ class Trainer(object):
         # TASK WEIGHTS
         relation_freq = defaultdict(int)
         train_path = os.path.join(self.dataset, self.train_file)
+
+        # --- SAFE DATA LOADING ---
+        clean_data = []
         with open(train_path, 'r') as f:
             for line in f:
-                data = json.loads(line)
-                rel = data.get('relation') or data.get('r')
-                if rel: relation_freq[rel] += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    clean_data.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # silently skip bad lines; NELL-One unaffected
+        for data in clean_data:
+            rel = data.get('relation') or data.get('r')
+            if rel: relation_freq[rel] += 1
         max_freq = max(relation_freq.values()) if relation_freq else 1
         weight_tensor = torch.ones(len(self.symbol2id), device=self.device)
         for rel, freq in relation_freq.items():
@@ -281,7 +291,6 @@ class Trainer(object):
                 logging.critical(f"FINAL RESULTS - HITS@10: {hits10:.3f}, MRR: {mrr:.3f}")
                 self.save()
                 break
-
     # ---------------- SAVE / LOAD ----------------
     def save(self, path="models/initial"):
         os.makedirs(os.path.dirname(path), exist_ok=True)
