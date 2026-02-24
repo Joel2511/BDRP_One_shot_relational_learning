@@ -22,8 +22,7 @@ class EmbedMatcher(nn.Module):
             self.actual_dim = embed_dim
         self.embed_dim = self.actual_dim 
         
-        # FIX: num_symbols is already the total count (16904). 
-        # We use it directly and set the last index as the padding.
+        # FIX: num_symbols is 16904. We use it directly.
         self.num_symbols = num_symbols
         self.pad_idx = num_symbols - 1
         self.symbol_emb = nn.Embedding(self.num_symbols, self.actual_dim, padding_idx=self.pad_idx)
@@ -31,11 +30,8 @@ class EmbedMatcher(nn.Module):
         self.aggregate = aggregate
         self.knn_k = knn_k
 
-        # GCN weights
         self.gcn_w = nn.Linear(2 * self.actual_dim, self.actual_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.actual_dim))
-        
-        # Sigmoid Gating Layer
         self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
         self.dropout = nn.Dropout(dropout)
 
@@ -45,11 +41,10 @@ class EmbedMatcher(nn.Module):
         init.constant_(self.gate_layer.bias, 0)
 
         if use_pretrain and embed is not None:
-            logging.info(f'LOADING {embed.shape[0]}D KB EMBEDDINGS INTO MATCHER')
-            # The sizes (16904) will now match perfectly
+            logging.info(f'LOADING {embed.shape[0]}x{embed.shape[1]} KB EMBEDDINGS')
+            # This copy will now succeed (16904 == 16904)
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
-                logging.info('FIX KB EMBEDDING (Non-Trainable)')
                 self.symbol_emb.weight.requires_grad = False
 
         d_model = self.actual_dim * 2
