@@ -64,7 +64,6 @@ class EmbedMatcher(nn.Module):
         rel_embeds = self.dropout(self.symbol_emb(relations))
         ent_embeds = self.dropout(self.symbol_emb(entities))
     
-        # Distance-based filtering for structural neighbors
         if entity_ids is not None:
             center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
             sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
@@ -90,12 +89,13 @@ class EmbedMatcher(nn.Module):
             batch_idx = torch.arange(knn_idx.size(0), device=knn_idx.device).unsqueeze(1)
             knn_ent_embeds = knn_ent_embeds[batch_idx, topk_idx]
     
-            knn_rel_embeds = self.dropout(self.symbol_emb(torch.zeros_like(knn_ent_embeds, dtype=torch.long)))
+            # FIX: Use knn_idx (the IDs) instead of knn_ent_embeds (the vectors) to create the zero-mask
+            knn_rel_embeds = self.dropout(self.symbol_emb(torch.zeros_like(knn_idx, dtype=torch.long)))
+            
             concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
             out_knn = self.gcn_w(concat_knn)
             knn_mean = out_knn.mean(dim=1).tanh()
     
-        # Gating logic
         if knn_mean is not None:
             gate_input = torch.cat((structural_repr, knn_mean), dim=-1)
             alpha = torch.sigmoid(self.gate_layer(gate_input))
@@ -104,7 +104,7 @@ class EmbedMatcher(nn.Module):
             final = structural_repr
     
         return final
-
+        
     def forward(self, query, support, query_meta=None, support_meta=None):
         if query_meta is None or support_meta is None:
             q_emb = self.symbol_emb(query).view(query.size(0), -1)
