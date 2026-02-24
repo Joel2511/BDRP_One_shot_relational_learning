@@ -19,7 +19,19 @@ class Trainer(object):
     def __init__(self, arg):
         super(Trainer, self).__init__()
         for k, v in vars(arg).items(): setattr(self, k, v)
-        # ... (rest of your device and meta setup) ...
+
+        if not torch.cuda.is_available():
+            self.device = torch.device("cpu")
+            logging.warning("No CUDA found. Running on CPU.")
+        else:
+            self.device = torch.device("cuda")
+        torch.backends.cudnn.benchmark = True
+
+        self.meta = not self.no_meta
+        
+        # --- FIXED LOGIC ---
+        # Initialize the flag outside the conditional blocks
+        use_pretrain = not self.random_embed
 
         logging.info('LOADING SYMBOL ID AND SYMBOL EMBEDDING')
         if self.test or self.random_embed:
@@ -27,10 +39,12 @@ class Trainer(object):
             use_pretrain = False
         else:
             self.load_embed()
+            # use_pretrain remains True here as initialized
+            
         self.use_pretrain = use_pretrain
+        # -------------------
 
-        # FIX: Remove the "- 1" so the size accounts for the PAD row
-        self.num_symbols = len(self.symbol2id.keys()) 
+        self.num_symbols = len(self.symbol2id.keys())
         self.pad_id = self.num_symbols - 1
 
         self.matcher = EmbedMatcher(
