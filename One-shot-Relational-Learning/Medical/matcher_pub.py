@@ -23,10 +23,13 @@ class EmbedMatcher(nn.Module):
             self.actual_dim = embed_dim
         self.embed_dim = self.actual_dim 
         
-        self.pad_idx = num_symbols
-        self.symbol_emb = nn.Embedding(num_symbols + 1, self.actual_dim, padding_idx=num_symbols)
-        self.aggregate = aggregate
+        # FIX: num_symbols is already the total count (16904). 
+        # We use it directly and set the last index as the padding.
         self.num_symbols = num_symbols
+        self.pad_idx = num_symbols - 1
+        self.symbol_emb = nn.Embedding(self.num_symbols, self.actual_dim, padding_idx=self.pad_idx)
+        
+        self.aggregate = aggregate
         self.knn_k = knn_k
 
         # GCN weights
@@ -35,7 +38,6 @@ class EmbedMatcher(nn.Module):
         
         # Sigmoid Gating Layer
         self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
-        
         self.dropout = nn.Dropout(dropout)
 
         init.xavier_normal_(self.gcn_w.weight)
@@ -44,7 +46,8 @@ class EmbedMatcher(nn.Module):
         init.constant_(self.gate_layer.bias, 0)
 
         if use_pretrain and embed is not None:
-            logging.info(f'LOADING {embed.shape[1]}D KB EMBEDDINGS INTO MATCHER')
+            logging.info(f'LOADING {embed.shape[0]}D KB EMBEDDINGS INTO MATCHER')
+            # The sizes (16904) will now match perfectly
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
                 logging.info('FIX KB EMBEDDING (Non-Trainable)')
@@ -58,7 +61,7 @@ class EmbedMatcher(nn.Module):
         self.knn_neighbors = None 
         if knn_path is not None:
             self.load_knn_index(knn_path)
-
+            
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
         relations = connections[:,:,0].squeeze(-1)
