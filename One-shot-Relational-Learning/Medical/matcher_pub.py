@@ -89,8 +89,9 @@ class EmbedMatcher(nn.Module):
             batch_idx = torch.arange(knn_idx.size(0), device=knn_idx.device).unsqueeze(1)
             knn_ent_embeds = knn_ent_embeds[batch_idx, topk_idx]
     
-            # FIX: Use knn_idx (the IDs) instead of knn_ent_embeds (the vectors) to create the zero-mask
-            knn_rel_embeds = self.dropout(self.symbol_emb(torch.zeros_like(knn_idx, dtype=torch.long)))
+            # FIX: Explicitly use the pad_idx for the pseudo-relations so it doesn't accidentally pull entity 0's embedding
+            pad_tensor = torch.full_like(knn_idx, self.pad_idx, dtype=torch.long, device=self.symbol_emb.weight.device)
+            knn_rel_embeds = self.dropout(self.symbol_emb(pad_tensor))
             
             concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
             out_knn = self.gcn_w(concat_knn)
