@@ -29,7 +29,7 @@ class EmbedMatcher(nn.Module):
         self.finetune = finetune
         self.semantic_matrix = semantic_matrix
     
-        self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=0)
+        self.symbol_emb = nn.Embedding(embed.shape[0], embed_dim, padding_idx=0)
     
         if use_pretrain:
             logging.info('LOADING KB EMBEDDINGS')
