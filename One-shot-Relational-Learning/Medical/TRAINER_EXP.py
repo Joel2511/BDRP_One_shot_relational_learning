@@ -14,7 +14,7 @@ from tensorboardX import SummaryWriter
 
 from args import read_options
 from data_loader import train_generate_medical
-from MATCHER import EmbedMatcher
+from MATCHER_EXP import EmbedMatcher
 
 # ============================================================
 #  DATASET CONFIG REGISTRY
