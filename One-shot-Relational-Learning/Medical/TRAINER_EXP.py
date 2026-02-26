@@ -76,8 +76,6 @@ class Trainer(object):
         self.use_pretrain = use_pretrain
 
         # Unified pad convention: PAD is always the last entry in symbol2id
-        # num_symbols = total entries - 1 (excludes PAD)
-        # pad_id      = num_symbols      (index of PAD row in embedding)
         self.num_symbols = len(self.symbol2id) - 1
         self.pad_id      = self.num_symbols
 
@@ -90,19 +88,19 @@ class Trainer(object):
             dropout=self.dropout,
             batch_size=self.batch_size,
             finetune=self.fine_tune,
-            semantic_matrix=self.semantic_matrix
+            semantic_matrix=self.semantic_matrix if self._is_medical else None
         )
         if torch.cuda.device_count() > 1:
             self.matcher = nn.DataParallel(self.matcher)
         self.matcher.to(self.device)
 
-        # --- OPTIMIZER: gate learns 10x slower ---
+        # --- OPTIMIZER: avoid duplicate params ---
         m = self.matcher.module if isinstance(self.matcher, nn.DataParallel) else self.matcher
-        gate_params = list(m.semantic_proj.parameters()) if hasattr(m, 'semantic_proj') and m.semantic_proj is not None else []
-        base_params = [p for n, p in m.named_parameters() if 'gate_layer' not in n]
+        semantic_params = list(m.semantic_proj.parameters()) if hasattr(m, 'semantic_proj') and m.semantic_proj is not None else []
+        base_params = [p for p in m.parameters() if p not in semantic_params]
         self.optim = optim.Adam([
             {'params': base_params, 'lr': self.lr},
-            {'params': gate_params, 'lr': self.lr * 0.1},
+            {'params': semantic_params, 'lr': self.lr * 0.1},
         ], weight_decay=self.weight_decay)
         self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
 
