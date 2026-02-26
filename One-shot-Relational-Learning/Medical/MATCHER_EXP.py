@@ -17,49 +17,34 @@ class EmbedMatcher(nn.Module):
     Otherwise pure structural GCN — same behaviour as both originals.
     """
 
-    def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
-                 dropout=0.2, batch_size=64, process_steps=4, finetune=False,
-                 aggregate='max', knn_k=32, knn_path=None):
+    def __init__(self, embed_dim, num_symbols, use_pretrain=True,
+             embed=None, dropout=0.2, batch_size=64,
+             finetune=False, semantic_matrix=None):
+
         super(EmbedMatcher, self).__init__()
-
-        self.actual_dim  = embed.shape[1] if embed is not None else embed_dim
-        self.embed_dim   = self.actual_dim
-        self.num_symbols = num_symbols
-        self.pad_idx     = num_symbols      # PAD is at index num_symbols
-        self.knn_k       = knn_k
-        self.aggregate   = aggregate
-
-        self.symbol_emb = nn.Embedding(
-            num_symbols + 1, self.actual_dim, padding_idx=num_symbols
-        )
-
-        # GCN
-        self.gcn_w    = nn.Linear(2 * self.actual_dim, self.actual_dim)
-        self.gcn_b    = nn.Parameter(torch.FloatTensor(self.actual_dim))
-        # Gate
-        self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
-        self.dropout    = nn.Dropout(dropout)
-
-        init.xavier_normal_(self.gcn_w.weight)
-        init.constant_(self.gcn_b, 0)
-        init.xavier_normal_(self.gate_layer.weight)
-        init.constant_(self.gate_layer.bias, 0)
-
-        if use_pretrain and embed is not None:
-            logging.info(f'LOADING {embed.shape[0]}x{embed.shape[1]} KB EMBEDDINGS INTO MATCHER')
+    
+        self.actual_dim = embed_dim
+        self.dropout = dropout
+        self.batch_size = batch_size
+        self.finetune = finetune
+        self.semantic_matrix = semantic_matrix
+    
+        self.symbol_emb = nn.Embedding(num_symbols + 1, embed_dim, padding_idx=0)
+    
+        if use_pretrain:
+            logging.info('LOADING KB EMBEDDINGS')
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
                 self.symbol_emb.weight.requires_grad = False
-
-        d_model = self.actual_dim * 2
-        self.support_encoder = SupportEncoder(d_model, 2 * d_model, dropout)
-        self.query_encoder   = QueryEncoder(d_model, process_steps)
-
-        # knn_neighbors: loaded from file if knn_path provided, else None
-        # Gate only activates when this is not None
-        self.knn_neighbors = None
-        if knn_path is not None:
-            self._load_knn(knn_path)
+    
+        self.dropout_layer = nn.Dropout(dropout)
+    
+        # Learnable semantic projection (NEW)
+        self.semantic_proj = None
+        if semantic_matrix is not None:
+            semantic_dim = semantic_matrix.shape[1]
+            self.semantic_proj = nn.Linear(semantic_dim, embed_dim, bias=False)
+            nn.init.xavier_normal_(self.semantic_proj.weight)
 
     def _load_knn(self, knn_path):
         try:
@@ -125,12 +110,23 @@ class EmbedMatcher(nn.Module):
 
     # ------------------------------------------------------------------
     def forward(self, query, support, query_meta=None, support_meta=None):
+    # --- Inject semantic projection into embedding table ---
+        if self.semantic_proj is not None and self.semantic_matrix is not None:
+            device = self.symbol_emb.weight.device
+            sem_tensor = torch.from_numpy(self.semantic_matrix).to(device)
+            projected = self.semantic_proj(sem_tensor)
+    
+            # Add projected semantic to entity portion only
+            # Relations are first block, entities come after
+            rel_count = projected.shape[0]
+            self.symbol_emb.weight.data[1:rel_count+1] += projected
+    
         if query_meta is None or support_meta is None:
             q_emb  = self.symbol_emb(query).view(query.size(0), -1)
             s_emb  = self.symbol_emb(support).view(support.size(0), -1)
             s_mean = s_emb.mean(dim=0, keepdim=True)
             return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
-
+    
         # Support both 4-tuple and 6-tuple meta (medical original used 6)
         if len(query_meta) == 6:
             q_l_conn, _, q_l_deg, q_r_conn, _, q_r_deg = query_meta
@@ -138,24 +134,24 @@ class EmbedMatcher(nn.Module):
         else:
             q_l_conn, q_l_deg, q_r_conn, q_r_deg = query_meta
             s_l_conn, s_l_deg, s_r_conn, s_r_deg = support_meta
-
+    
         q_h_ids = query[:, 0]
         q_t_ids = query[:, 1]
         s_h_ids = support[:, 0]
         s_t_ids = support[:, 1]
-
+    
         query_left    = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids)
         query_right   = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids)
         support_left  = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids)
         support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids)
-
+    
         query_neighbor   = torch.cat((query_left,   query_right),   dim=-1)
         support_neighbor = torch.cat((support_left, support_right), dim=-1)
-
+    
         support_g = torch.mean(self.support_encoder(support_neighbor.unsqueeze(0)), dim=1)
         query_g   = self.support_encoder(query_neighbor.unsqueeze(1)).squeeze(1)
-
+    
         query_f   = F.normalize(self.query_encoder(support_g.squeeze(0), query_g), p=2, dim=-1)
         support_g = F.normalize(support_g.squeeze(0), p=2, dim=-1)
-
+    
         return torch.matmul(query_f, support_g.t()).squeeze(-1)
