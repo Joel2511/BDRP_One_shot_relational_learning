@@ -83,16 +83,14 @@ class Trainer(object):
 
         # --- MATCHER ---
         self.matcher = EmbedMatcher(
-            embed_dim     = self.embed_dim,
-            num_symbols   = self.num_symbols,
-            use_pretrain  = self.use_pretrain,
-            embed         = self.symbol2vec,
-            dropout       = self.dropout,
-            batch_size    = self.batch_size,
-            process_steps = self.process_steps,
-            finetune      = self.fine_tune,
-            aggregate     = self.aggregate,
-            knn_k         = self.knn_k,
+            embed_dim=self.embed_dim,
+            num_symbols=self.num_symbols,
+            use_pretrain=True,
+            embed=self.symbol2vec,
+            dropout=self.dropout,
+            batch_size=self.batch_size,
+            finetune=self.fine_tune,
+            semantic_matrix=self.semantic_matrix
         )
         if torch.cuda.device_count() > 1:
             self.matcher = nn.DataParallel(self.matcher)
