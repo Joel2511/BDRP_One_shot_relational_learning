@@ -18,8 +18,6 @@ from MATCHER import EmbedMatcher
 
 # ============================================================
 #  DATASET CONFIG REGISTRY
-#  Each prefix maps to its unique hyperparameters and flags.
-#  Add ATOMIC here once its data is ready.
 # ============================================================
 DATASET_CONFIGS = {
     # ---- NELL-One ----
@@ -28,7 +26,7 @@ DATASET_CONFIGS = {
     # max pooling, tight LR decay.
     'nell': {
         'step_size':    1000,
-        'gate_mode':    'learned',    # full learned sigmoid gate
+        'gate_mode':    'learned',
         'margin':       1.0,
         'weight_cap':   10.0,
         'train_file':   'train_tasks.json',
@@ -44,8 +42,8 @@ DATASET_CONFIGS = {
     # Looser LR decay (step_size=3000) because model needs longer to converge.
     'fb15k': {
         'step_size':    3000,
-        'gate_mode':    'fixed',      # fixed alpha blend, no learned gate
-        'gate_alpha':   0.9,          # structural weight
+        'gate_mode':    'fixed',
+        'gate_alpha':   0.9,
         'margin':       5.0,
         'weight_cap':   10.0,
         'train_file':   'train_tasks.json',
@@ -59,6 +57,7 @@ DATASET_CONFIGS = {
     # Hierarchical graph (avg degree 63.62). PubMedBERT embeddings.
     # Uses object_only filter. escape_keys=True for ontology URI formatting.
     # Weight cap lowered to 5.0 to prevent rare relations dominating gradients.
+    # margin=3.0 REQUIRES the gate to actually work — see MATCHER fix.
     'medical': {
         'step_size':    3000,
         'gate_mode':    'learned',
@@ -73,18 +72,25 @@ DATASET_CONFIGS = {
     },
     # ---- ATOMIC ----
     # Extreme sparse commonsense graph (avg degree 8.36, 82% sparsity).
-    # Slot reserved — fill once ATOMIC data/embeddings are ready.
+    # Entities are free-form text strings, NOT canonical IDs.
+    # RoBERTa semantic embeddings carry almost all signal — structural is very weak.
+    # Uses dev_tasks.json (not validation_tasks.json) — matched to baseline convention.
+    # margin=1.0 (same as NELL — sparse graph, small score range).
+    # gate_mode='semantic_only': structural branch is near-random for string entities,
+    #   so we lean heavily on the semantic channel via the gate.
+    # weight_cap=10.0 because relation frequency varies wildly across 9 relation types.
     'atomic': {
         'step_size':    1000,
         'gate_mode':    'learned',
         'margin':       1.0,
         'weight_cap':   10.0,
         'train_file':   'train_tasks.json',
-        'val_file':     'validation_tasks.json',
+        'val_file':     'dev_tasks.json',       # ATOMIC uses dev_tasks.json, not validation_tasks.json
         'test_file':    'test_tasks.json',
         'is_medical':   False,
         'object_only':  False,
         'escape_keys':  False,
+        'is_atomic':    True,                   # Flag for string-entity handling
     },
 }
 
@@ -93,9 +99,11 @@ def get_dataset_config(prefix):
     Match a prefix string to a config block.
     E.g. 'nell_one_semantic_luke' -> 'nell' config.
     Falls back to 'nell' defaults if no match found.
+    Priority order matters: check 'fb15k' before 'nell' to avoid substring false match.
     """
     prefix_lower = prefix.lower()
-    for key in DATASET_CONFIGS:
+    # Explicit priority order to avoid substring collisions
+    for key in ['fb15k', 'medical', 'atomic', 'nell']:
         if key in prefix_lower:
             return DATASET_CONFIGS[key]
     logging.warning(f"No config found for prefix '{prefix}'. Defaulting to nell config.")
@@ -118,11 +126,11 @@ class Trainer(object):
         self.cfg = get_dataset_config(self.prefix)
         logging.info(f"Dataset config loaded for prefix '{self.prefix}': {self.cfg}")
 
-        self.meta       = not self.no_meta
+        self.meta        = not self.no_meta
         self.use_pretrain = not self.random_embed
+        self.is_atomic   = self.cfg.get('is_atomic', False)
 
         # ---- file names (config overrides args if not explicitly set) ----
-        # Allow CLI overrides; fall back to config defaults
         if not getattr(self, 'train_file', None):
             self.train_file = self.cfg['train_file']
         if not getattr(self, 'val_file', None):
@@ -131,10 +139,10 @@ class Trainer(object):
             self.test_file  = self.cfg['test_file']
 
         # ---- load entity/relation maps ----
-        self.ent2id        = json.load(open(os.path.join(self.dataset, 'ent2ids')))
-        self.num_ents      = len(self.ent2id)
+        self.ent2id         = json.load(open(os.path.join(self.dataset, 'ent2ids')))
+        self.num_ents       = len(self.ent2id)
         self.rel2candidates = json.load(open(os.path.join(self.dataset, 'rel2candidates.json')))
-        self.e1rel_e2      = json.load(open(os.path.join(self.dataset, 'e1rel_e2.json')))
+        self.e1rel_e2       = json.load(open(os.path.join(self.dataset, 'e1rel_e2.json')))
 
         # ---- load symbols + embeddings ----
         logging.info("LOADING SYMBOL ID AND SYMBOL EMBEDDING")
@@ -176,12 +184,11 @@ class Trainer(object):
                 {'params': gate_params, 'lr': self.lr * 0.1},
             ], weight_decay=self.weight_decay)
         else:
-            # Fixed gate: no gate params to train separately
             self.optim = optim.Adam(
                 m.parameters(), lr=self.lr, weight_decay=self.weight_decay
             )
 
-        # ---- LR scheduler: dataset-specific step_size ----
+        # ---- LR scheduler ----
         self.scheduler = optim.lr_scheduler.StepLR(
             self.optim, step_size=self.cfg['step_size'], gamma=0.5
         )
@@ -211,7 +218,11 @@ class Trainer(object):
         return self.symbol2id.get(self.escape_token(token), self.pad_id)
 
     def _ent(self, token):
-        """Look up ent2id with optional escaping."""
+        """
+        Look up ent2id with optional escaping.
+        For ATOMIC, entity strings may not be canonical IDs.
+        Returns 0 as fallback (safe — pad_id is num_symbols, not 0).
+        """
         return self.ent2id.get(self.escape_token(token), 0)
 
     # ------------------------------------------------------------------
@@ -242,18 +253,23 @@ class Trainer(object):
         ent_embed = np.loadtxt(os.path.join(self.dataset, f'entity2vec.{self.embed_model}'))
         rel_embed = np.loadtxt(os.path.join(self.dataset, f'relation2vec.{self.embed_model}'))
 
-        # standardise
+        # Standardise structural embeddings
         ent_embed = (ent_embed - ent_embed.mean()) / (ent_embed.std() + 1e-3)
         rel_embed = (rel_embed - rel_embed.mean()) / (rel_embed.std() + 1e-3)
         logging.info(f"Loaded {self.embed_model} as standard floats.")
 
         # ---- semantic channel ----
         if getattr(self, 'use_semantic', False):
-            # Medical uses a named file; others use prefix_anchors.npy
             if self.cfg['is_medical']:
                 sb_file = os.path.join(
                     os.path.dirname(self.dataset),
                     f'medical_{self.semantic_type}_anchors.npy'
+                )
+            elif self.is_atomic:
+                # ATOMIC: RoBERTa sentence embeddings stored per entity
+                sb_file = os.path.join(
+                    os.path.dirname(self.dataset),
+                    f'{self.prefix}_anchors.npy'
                 )
             else:
                 sb_file = os.path.join(
@@ -308,9 +324,7 @@ class Trainer(object):
     def build_connection_matrix(self, max_=100):
         """
         Build the neighbor connection matrix.
-        FIX: shuffle before truncation to remove file-order bias.
-        Dense graphs (FB15k, Medical) hit the cap frequently; without shuffling
-        the same relation types are always selected, missing the tail types.
+        Shuffle before truncation to remove file-order bias (critical for dense graphs).
         """
         self.connections  = np.ones((self.num_ents, max_, 2), dtype=int) * self.pad_id
         self.e1_rele2     = defaultdict(list)
@@ -350,19 +364,44 @@ class Trainer(object):
     #  Task weights
     # ------------------------------------------------------------------
     def compute_task_weights(self):
+        """
+        Compute inverse-sqrt frequency weights per relation.
+        IMPORTANT: reads weight_cap from dataset config, not hardcoded.
+        For ATOMIC: weight_cap=10.0. For Medical: weight_cap=5.0.
+        Falls back to uniform weights if file can't be parsed — logs a warning.
+        """
         relation_freq = defaultdict(int)
-        with open(os.path.join(self.dataset, self.train_file), 'r') as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                    rel  = data.get('relation') or data.get('r')
-                    if rel:
-                        relation_freq[rel] += 1
-                except json.JSONDecodeError:
-                    continue
+        train_path = os.path.join(self.dataset, self.train_file)
 
-        max_freq   = max(relation_freq.values()) if relation_freq else 1
+        try:
+            if self.train_file.endswith('.json'):
+                data = json.load(open(train_path))
+                # JSON format: {relation: [[h, r, t], ...]}
+                for rel, triples in data.items():
+                    relation_freq[rel] = len(triples)
+            else:
+                # JSONL format
+                with open(train_path, 'r') as f:
+                    for line in f:
+                        try:
+                            d   = json.loads(line)
+                            rel = d.get('relation') or d.get('r')
+                            if rel:
+                                relation_freq[rel] += 1
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            logging.warning(f"compute_task_weights: could not parse {train_path}: {e}. Using uniform weights.")
+
+        if not relation_freq:
+            logging.warning("compute_task_weights: relation_freq is empty — all tasks will have weight 1.0")
+            return torch.ones(len(self.symbol2id), device=self.device)
+
+        max_freq   = max(relation_freq.values())
         weight_cap = self.cfg['weight_cap']
+        logging.info(f"Task weight_cap={weight_cap}, max_freq={max_freq}, "
+                     f"num_relations={len(relation_freq)}")
+
         weight_tensor = torch.ones(len(self.symbol2id), device=self.device)
         for rel, freq in relation_freq.items():
             rid = self._sym(rel)
@@ -389,7 +428,6 @@ class Trainer(object):
 
             support_meta = tuple(t.to(self.device) for t in self.get_meta(s_l, s_r))
             query_meta   = tuple(t.to(self.device) for t in self.get_meta(q_l, q_r))
-            # FIX: false triples use their own neighborhood, not query's
             false_meta   = tuple(t.to(self.device) for t in self.get_meta(f_l, f_r))
 
             support = torch.clamp(torch.LongTensor(support_p).to(self.device), 0, self.pad_id)
@@ -406,11 +444,15 @@ class Trainer(object):
                 query_scores = self.matcher(query, support, query_meta, support_meta)
                 false_scores = self.matcher(false, support, false_meta, support_meta)
 
-            loss = (F.relu(self.margin - (query_scores - false_scores)) * task_weight).mean()
+            margin = self.cfg['margin']
+            loss = (F.relu(margin - (query_scores - false_scores)) * task_weight).mean()
             losses.append(loss.item())
 
             self.optim.zero_grad()
             loss.backward()
+            # Gradient clipping — important for ATOMIC (string entities → noisy grads)
+            if hasattr(self, 'grad_clip') and self.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(self.matcher.parameters(), self.grad_clip)
             self.optim.step()
 
             if self.batch_nums % self.log_every == 0:
@@ -454,6 +496,10 @@ class Trainer(object):
     #  Evaluation
     # ------------------------------------------------------------------
     def load_tasks(self, file_path):
+        """
+        Load eval tasks from either JSON or JSONL.
+        Supports multiple field naming conventions (head/h, relation/r, tail/t).
+        """
         if file_path.endswith('.json'):
             return json.load(open(file_path))
         tasks = defaultdict(list)
@@ -463,9 +509,9 @@ class Trainer(object):
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                h = data.get('head')   or data.get('h')
+                h = data.get('head')     or data.get('h')
                 r = data.get('relation') or data.get('r')
-                t = data.get('tail')   or data.get('t')
+                t = data.get('tail')     or data.get('t')
                 if not h or not t:
                     q = data.get('query') or data.get('query_enc')
                     if isinstance(q, list) and len(q) >= 2:
@@ -474,14 +520,46 @@ class Trainer(object):
                     tasks[r].append([h, r, t])
         return tasks
 
+    def _resolve_eval_file(self, mode):
+        """
+        Resolve the evaluation file path.
+        For 'dev' mode:
+          - Tries self.val_file first (from config, e.g. 'dev_tasks.json' for ATOMIC)
+          - Falls back to 'validation_tasks.json' then 'dev_tasks.json' for compatibility
+            with any dataset that hasn't set a custom val_file
+        This matches the baseline eval() fallback behaviour.
+        """
+        if mode == 'dev':
+            # Primary: config-specified val_file
+            primary = os.path.join(self.dataset, self.val_file)
+            if os.path.exists(primary):
+                return primary
+            # Fallback 1: validation_tasks.json (standard)
+            fallback1 = os.path.join(self.dataset, 'validation_tasks.json')
+            if os.path.exists(fallback1):
+                logging.warning(f"val_file '{self.val_file}' not found; using {fallback1}")
+                return fallback1
+            # Fallback 2: dev_tasks.json (ATOMIC baseline convention)
+            fallback2 = os.path.join(self.dataset, 'dev_tasks.json')
+            if os.path.exists(fallback2):
+                logging.warning(f"Using {fallback2} as dev fallback")
+                return fallback2
+            raise FileNotFoundError(
+                f"No dev tasks file found in {self.dataset}. "
+                f"Tried: {self.val_file}, validation_tasks.json, dev_tasks.json"
+            )
+        else:
+            test_path = os.path.join(self.dataset, self.test_file)
+            if os.path.exists(test_path):
+                return test_path
+            raise FileNotFoundError(f"Test file not found: {test_path}")
+
     def eval(self, mode='dev', meta=False):
         self.matcher.eval()
         hits10, hits5, hits1, mrr = [], [], [], []
         EVAL_BATCH = 1024
 
-        task_file = os.path.join(
-            self.dataset, self.val_file if mode == 'dev' else self.test_file
-        )
+        task_file  = self._resolve_eval_file(mode)
         test_tasks = self.load_tasks(task_file)
 
         for rel_name, triples in test_tasks.items():
@@ -510,11 +588,10 @@ class Trainer(object):
                 h_esc     = self.escape_token(triple[0])
                 r_esc     = self.escape_token(triple[1])
 
-                # --- build valid candidate set ---
+                # --- build valid candidate set (filtered ranking) ---
                 valid_cands = []
                 for ent in raw_candidates:
                     ent_esc = self.escape_token(ent)
-                    # filter already-known true answers (except the target)
                     if (ent != true_ent and
                             h_esc in self.e1rel_e2 and
                             r_esc in self.e1rel_e2.get(h_esc, {}) and
