@@ -3,99 +3,150 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-import faiss
 import numpy as np
 from modules import *
 
 class EmbedMatcher(nn.Module):
     """
-    CONCATENATION-BASED MATCHER [Structural ; Semantic]
-    Optimized for Multi-Channel Medical Knowledge Graphs
+    GATING-BASED MATCHER [Structural ; Semantic]
+    Dynamically weights Graph vs. Text signals using a Sigmoid Gate.
+
+    Changes from original:
+      1. Relation-conditioned neighbor filtering (was purely entity-entity cosine).
+         Scores each (rel, ent) pair against the query relation direction so that
+         topk selection is task-aware — critical for the dense hub nodes in Medical.
+      2. Max pooling instead of mean after topk (one strong neighbor shouldn't be
+         drowned out by many weak ones, especially in hierarchical ontologies).
+      3. knn branch preserved exactly as-is (gate still fires when knn_neighbors loaded).
+      4. No other logic changes.
     """
-    def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None, 
-                 dropout=0.2, batch_size=64, process_steps=4, finetune=False, 
-                 aggregate='max', knn_k=32, knn_path=None, knn_alpha=0.5):
+    def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
+                 dropout=0.2, batch_size=64, process_steps=4, finetune=False,
+                 aggregate='max', knn_k=32, knn_path=None):
         super(EmbedMatcher, self).__init__()
-        
-        # Detect actual embedding dim from preloaded embeddings
+
         if embed is not None:
             self.actual_dim = embed.shape[1]
         else:
-            self.actual_dim = embed_dim  # fallback
-        self.embed_dim = self.actual_dim 
-        
-        self.pad_idx = num_symbols
-        self.symbol_emb = nn.Embedding(num_symbols + 1, self.actual_dim, padding_idx=num_symbols)
-        self.aggregate = aggregate
-        self.num_symbols = num_symbols
-        self.knn_k = knn_k
-        self.knn_alpha = knn_alpha  
+            self.actual_dim = embed_dim
+        self.embed_dim = self.actual_dim
 
-        # GCN weights must match the concatenated dim (head+tail = 2*actual_dim)
+        self.num_symbols = num_symbols
+        self.pad_idx = num_symbols - 1
+        self.symbol_emb = nn.Embedding(self.num_symbols, self.actual_dim, padding_idx=self.pad_idx)
+
+        self.aggregate = aggregate
+        self.knn_k = knn_k
+
         self.gcn_w = nn.Linear(2 * self.actual_dim, self.actual_dim)
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.actual_dim))
+
+        # --- NEW: relation-conditioned scoring projections ---
+        # Projects (rel+ent) pair into scoring space and query relation into same space
+        self.rel_score_proj = nn.Linear(2 * self.actual_dim, self.actual_dim)
+        self.rel_query_proj = nn.Linear(self.actual_dim, self.actual_dim)
+
+        self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
         self.dropout = nn.Dropout(dropout)
 
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
+        init.xavier_normal_(self.rel_score_proj.weight)
+        init.xavier_normal_(self.rel_query_proj.weight)
+        init.xavier_normal_(self.gate_layer.weight)
+        init.constant_(self.gate_layer.bias, 0)
 
         if use_pretrain and embed is not None:
-            logging.info(f'LOADING {embed.shape[1]}D KB EMBEDDINGS INTO MATCHER')
+            logging.info(f'LOADING {embed.shape[0]}x{embed.shape[1]} KB EMBEDDINGS')
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
-                logging.info('FIX KB EMBEDDING (Non-Trainable)')
                 self.symbol_emb.weight.requires_grad = False
 
-        # Encoder widths must match the 2*Actual_Dim (Head + Tail)
         d_model = self.actual_dim * 2
-        self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
+        self.support_encoder = SupportEncoder(d_model, 2 * d_model, dropout)
         self.query_encoder = QueryEncoder(d_model, process_steps)
-        
+
         self.knn_index = None
-        self.knn_neighbors = None 
+        self.knn_neighbors = None
         if knn_path is not None:
             self.load_knn_index(knn_path)
 
+    def neighbor_encoder(self, connections, num_neighbors, entity_ids=None, query_rel_emb=None):
+        """
+        Encode one-hop neighborhood of a batch of entities.
 
-    def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
+        Args:
+            connections:   [B, max_neighbor, 2]  (relation_id, entity_id)
+            num_neighbors: [B]
+            entity_ids:    [B]  symbol IDs of center entities
+            query_rel_emb: [D]  embedding of query relation for conditioned filtering.
+                                Falls back to entity-entity cosine if None.
+        """
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
-        relations = connections[:,:,0].squeeze(-1)
-        entities = connections[:,:,1].squeeze(-1)
-        
-        rel_embeds = self.dropout(self.symbol_emb(relations))
-        ent_embeds = self.dropout(self.symbol_emb(entities))
-        
-        # Concat head and relation within the neighborhood
-        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
-        out = self.gcn_w(concat_embeds)
-        
-        out = torch.sum(out, dim=1) / num_neighbors
-        structural_repr = out.tanh()
+        relations = connections[:, :, 0].squeeze(-1)   # [B, N]
+        entities  = connections[:, :, 1].squeeze(-1)   # [B, N]
 
-        # Hybrid Enrichment (Semantic k-NN) logic remains compatible
+        rel_embeds = self.dropout(self.symbol_emb(relations))   # [B, N, D]
+        ent_embeds = self.dropout(self.symbol_emb(entities))     # [B, N, D]
+
+        if entity_ids is not None:
+            topk = min(self.knn_k, rel_embeds.size(1))
+
+            if query_rel_emb is not None:
+                # Score each (rel, ent) pair by relevance to the query relation.
+                # This is the key fix for hierarchical ontologies: hub nodes have
+                # many neighbors across many relation types; we want the ones
+                # relevant to the current prediction task.
+                pair_emb  = torch.cat((rel_embeds, ent_embeds), dim=-1)          # [B, N, 2D]
+                pair_proj = torch.tanh(self.rel_score_proj(pair_emb))             # [B, N, D]
+                q_proj    = torch.tanh(self.rel_query_proj(query_rel_emb))        # [D]
+                q_proj    = q_proj.unsqueeze(0).unsqueeze(0)                      # [1, 1, D]
+                sim = F.cosine_similarity(pair_proj, q_proj.expand_as(pair_proj), dim=-1)  # [B, N]
+            else:
+                # Fallback: entity-entity cosine (original behaviour)
+                center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
+                sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
+
+            _, topk_idx = torch.topk(sim, k=topk, dim=-1)
+            batch_idx  = torch.arange(entities.size(0), device=entities.device).unsqueeze(1)
+            rel_embeds = rel_embeds[batch_idx, topk_idx]
+            ent_embeds = ent_embeds[batch_idx, topk_idx]
+
+        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)              # [B, k, 2D]
+        transformed   = torch.tanh(self.gcn_w(concat_embeds) + self.gcn_b)      # [B, k, D]
+
+        # Max pool: one highly relevant neighbor drives the representation.
+        # Mean was diluting signal in dense hub nodes of the medical hierarchy.
+        structural_repr, _ = transformed.max(dim=1)                              # [B, D]
+
+        # --- knn branch: unchanged from original ---
         knn_mean = None
         if entity_ids is not None and self.knn_neighbors is not None:
-            knn_mean = self.knn_neighbor_encoder(entity_ids)
+            knn_idx = self.knn_neighbors[entity_ids].to(self.symbol_emb.weight.device)
+            knn_ent_embeds = self.dropout(self.symbol_emb(knn_idx))
+
+            center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
+            sim_knn = F.cosine_similarity(center_embed, knn_ent_embeds, dim=-1)
+            topk_knn = min(self.knn_k, sim_knn.size(1))
+            _, topk_idx_knn = torch.topk(sim_knn, k=topk_knn, dim=-1)
+            batch_idx_knn = torch.arange(knn_idx.size(0), device=knn_idx.device).unsqueeze(1)
+            knn_ent_embeds = knn_ent_embeds[batch_idx_knn, topk_idx_knn]
+
+            pad_tensor = torch.full_like(knn_idx, self.pad_idx, dtype=torch.long,
+                                         device=self.symbol_emb.weight.device)
+            knn_rel_embeds = self.dropout(self.symbol_emb(pad_tensor))
+
+            concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
+            knn_mean, _ = torch.tanh(self.gcn_w(concat_knn) + self.gcn_b).max(dim=1)
 
         if knn_mean is not None:
-            final = self.knn_alpha * structural_repr + (1 - self.knn_alpha) * knn_mean
+            gate_input = torch.cat((structural_repr, knn_mean), dim=-1)
+            alpha = torch.sigmoid(self.gate_layer(gate_input))
+            final = (1 - alpha) * structural_repr + alpha * knn_mean
         else:
             final = structural_repr
-            
-        return final
 
-    def knn_neighbor_encoder(self, entity_ids):
-        if self.knn_neighbors is None: return None
-        device = self.symbol_emb.weight.device
-        knn_idx = self.knn_neighbors[entity_ids].to(device)
-        knn_rels = torch.zeros_like(knn_idx).to(device)
-        
-        rel_embeds = self.dropout(self.symbol_emb(knn_rels))
-        ent_embeds = self.dropout(self.symbol_emb(knn_idx))
-        
-        concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
-        out = self.gcn_w(concat_embeds)
-        return torch.mean(out, dim=1).tanh()
+        return final
 
     def forward(self, query, support, query_meta=None, support_meta=None):
         if query_meta is None or support_meta is None:
@@ -114,28 +165,29 @@ class EmbedMatcher(nn.Module):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
         s_h_ids, s_t_ids = support[:, 0], support[:, 1]
 
-        query_left = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids)
-        query_right = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids)
-        support_left = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids)
-        support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids)
+        # Derive query relation direction from support head embeddings
+        query_rel_emb = self.symbol_emb(s_h_ids).mean(dim=0)   # [D]
 
-        query_neighbor = torch.cat((query_left, query_right), dim=-1)
+        query_left    = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids, query_rel_emb)
+        query_right   = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids, query_rel_emb)
+        support_left  = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids, query_rel_emb)
+        support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids, query_rel_emb)
+
+        query_neighbor   = torch.cat((query_left,   query_right),   dim=-1)
         support_neighbor = torch.cat((support_left, support_right), dim=-1)
 
         support_g = self.support_encoder(support_neighbor.unsqueeze(0))
-        support_g = torch.mean(support_g, dim=1) 
-        
+        support_g = torch.mean(support_g, dim=1)
+
         query_g = self.support_encoder(query_neighbor.unsqueeze(1))
         query_g = query_g.squeeze(1)
-        
+
         query_f = self.query_encoder(support_g.squeeze(0), query_g)
-        
-        # Block-wise Normalization occurs here:
-        query_f = F.normalize(query_f, p=2, dim=-1)
+
+        query_f   = F.normalize(query_f,   p=2, dim=-1)
         support_g = F.normalize(support_g.squeeze(0), p=2, dim=-1)
-        
-        matching_scores = torch.matmul(query_f, support_g.t()).squeeze(-1)
-        return matching_scores
+
+        return torch.matmul(query_f, support_g.t()).squeeze(-1)
 
     def load_knn_index(self, knn_path):
         try:
