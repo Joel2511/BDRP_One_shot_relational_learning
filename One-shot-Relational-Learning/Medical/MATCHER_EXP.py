@@ -18,14 +18,23 @@ class EmbedMatcher(nn.Module):
         - ATOMIC    : extreme sparse commonsense, RoBERTa embeddings, learned gate
 
     Key design choices:
-        1. Relation-conditioned neighbor filtering (not entity-entity cosine):
+        1. Relation-conditioned neighbor filtering:
            scores each (rel, ent) pair against the query relation direction,
            so topk selection is task-aware — critical for dense and hierarchical graphs.
+
         2. Max pooling after topk: one highly relevant neighbor drives the
            representation rather than being averaged out by irrelevant ones.
-        3. gate_mode='learned': full sigmoid gate trained end-to-end.
-           gate_mode='fixed': fixed linear blend alpha*struct + (1-alpha)*sem,
-           no gate parameters trained — used for FB15k where gate saturates.
+
+        3. DUAL-BRANCH GATE (learned mode):
+           - Structural branch: GCN aggregation over neighborhood (connection matrix)
+           - Semantic branch: direct raw embedding lookup for the center entity
+             (this carries the LM signal: PubMedBERT/LUKE/RoBERTa)
+           - Gate: sigmoid(linear(cat(structural, semantic))) → scalar alpha
+           - Output: alpha * structural + (1-alpha) * semantic
+           This replaces the previous broken gate that fed cat(x, x).
+
+        4. gate_mode='fixed': pure structural, no gate parameters trained.
+           Used for FB15k where a learned gate saturates.
 
     Parameters
     ----------
@@ -48,10 +57,10 @@ class EmbedMatcher(nn.Module):
         self.gate_mode  = gate_mode
         self.gate_alpha = gate_alpha if gate_alpha is not None else 0.9
 
-        self.pad_idx    = num_symbols
+        self.pad_idx     = num_symbols
         self.num_symbols = num_symbols
-        self.knn_k      = knn_k
-        self.aggregate  = aggregate
+        self.knn_k       = knn_k
+        self.aggregate   = aggregate
 
         # ---- embedding table ----
         self.symbol_emb = nn.Embedding(
@@ -63,13 +72,15 @@ class EmbedMatcher(nn.Module):
         self.gcn_b = nn.Parameter(torch.FloatTensor(self.actual_dim))
 
         # ---- relation-conditioned neighbor scoring projections ----
-        # Projects each (rel, ent) pair into a space where relevance to the
-        # query relation can be measured by cosine similarity.
         self.rel_score_proj = nn.Linear(2 * self.actual_dim, self.actual_dim)
         self.rel_query_proj = nn.Linear(self.actual_dim, self.actual_dim)
 
         # ---- gate layer (only used when gate_mode='learned') ----
-        # Takes concatenation of structural and semantic repr → scalar alpha
+        # Takes cat(structural_repr, semantic_repr) → scalar alpha in [0, 1]
+        # This is the DUAL-BRANCH gate — structural and semantic are genuinely different:
+        #   structural = GCN aggregation over one-hop neighbors (topology signal)
+        #   semantic   = raw embedding of center entity (LM signal)
+        # The gate learns when to trust topology vs language model signal.
         self.gate_layer = nn.Linear(2 * self.actual_dim, 1)
 
         self.dropout = nn.Dropout(dropout)
@@ -81,6 +92,7 @@ class EmbedMatcher(nn.Module):
         init.constant_(self.rel_score_proj.bias, 0)
         init.xavier_normal_(self.rel_query_proj.weight)
         init.constant_(self.rel_query_proj.bias, 0)
+        # Gate bias init to 0 → initial alpha ≈ 0.5 (balanced blend at start of training)
         init.xavier_normal_(self.gate_layer.weight)
         init.constant_(self.gate_layer.bias, 0)
 
@@ -107,13 +119,12 @@ class EmbedMatcher(nn.Module):
         connections   : [B, max_neighbor, 2]  int — (relation_id, entity_id) per slot
         num_neighbors : [B]                   float — actual degree of each entity
         entity_ids    : [B]                   int — symbol IDs of the center entities
-        query_rel_emb : [D]                   float — query relation embedding used for
+        query_rel_emb : [D]                   float — query relation embedding for
                                               relation-conditioned neighbor scoring.
-                                              Falls back to entity-entity cosine if None.
 
         Returns
         -------
-        [B, D]  — entity representation after neighborhood aggregation
+        [B, D]  — entity representation after neighborhood aggregation + gating
         """
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
 
@@ -129,8 +140,6 @@ class EmbedMatcher(nn.Module):
 
             if query_rel_emb is not None:
                 # Score each (rel, ent) pair against the query relation direction.
-                # Fixes the dense-graph problem where entity-entity cosine ignores
-                # which relation type a neighbor is connected through.
                 pair_emb  = torch.cat((rel_embeds, ent_embeds), dim=-1)           # [B, N, 2D]
                 pair_proj = torch.tanh(self.rel_score_proj(pair_emb))              # [B, N, D]
                 q_proj    = torch.tanh(self.rel_query_proj(query_rel_emb))         # [D]
@@ -139,7 +148,7 @@ class EmbedMatcher(nn.Module):
                     pair_proj, q_proj.expand_as(pair_proj), dim=-1
                 )                                                                  # [B, N]
             else:
-                # Fallback: plain entity-entity cosine (original G-Matching behaviour)
+                # Fallback: plain entity-entity cosine
                 center_embed = self.symbol_emb(entity_ids).unsqueeze(1)            # [B, 1, D]
                 sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)        # [B, N]
 
@@ -155,41 +164,43 @@ class EmbedMatcher(nn.Module):
         transformed   = torch.tanh(self.gcn_w(concat_embeds) + self.gcn_b)        # [B, k, D]
 
         # ---- max pooling ----
-        # One highly relevant neighbor should dominate, not be diluted by
-        # many irrelevant ones (mean pooling fails on dense/hierarchical graphs).
         structural_repr, _ = transformed.max(dim=1)                                # [B, D]
 
         # ---- gate (dataset-specific behaviour) ----
-        # The semantic signal is already fused into symbol_emb at load time
-        # via BERT/LUKE/PubMedBERT concatenation. The gate here decides how
-        # much of the "semantic direction" in the embedding to keep at runtime.
-        #
-        # gate_mode='learned': a sigmoid gate is trained end-to-end.
-        #   Works well for NELL-One and Medical where semantic and structural
-        #   signals are genuinely complementary.
-        #
-        # gate_mode='fixed': structural_repr * alpha + structural_repr * (1-alpha)
-        #   = structural_repr (degenerate, but the alpha controls how much the
-        #   GCN output is scaled before downstream use vs the raw embedding).
-        #   Used for FB15k where a learned gate saturates and kills training.
-        #   In practice for FB15k: just return structural_repr unmodified so
-        #   the model relies purely on the GCN aggregation.
-        #
-        # NOTE: If you later want a proper dual-branch semantic channel for FB15k,
-        # add a separate entity embedding lookup here and blend with gate_alpha.
-        # For now, fixed mode = pure structural, which is what FB15k needs.
-
         if self.gate_mode == 'fixed':
-            # Pure structural — semantic already baked into embeddings at load time,
-            # no runtime gate to saturate.
+            # Pure structural — no gate saturation risk.
+            # For FB15k: topology signal is reliable, semantic is noisy.
             return structural_repr
+
         else:
-            # Learned gate: concatenate structural_repr with itself as a placeholder
-            # (gate fires properly once a real knn_branch is added;
-            #  for now it learns a per-entity scalar that modulates the output).
-            gate_input = torch.cat((structural_repr, structural_repr), dim=-1)     # [B, 2D]
+            # DUAL-BRANCH learned gate:
+            #   structural_repr = GCN aggregation (topology signal)
+            #   semantic_repr   = raw embedding of center entity (LM signal)
+            #
+            # For Medical: PubMedBERT semantic + ComplEx structural are complementary.
+            #   Gate learns: use structural for common ontology hubs,
+            #                use semantic for rare leaf-node relations.
+            #
+            # For NELL-One: LUKE semantic + TransE structural are complementary.
+            #   Sparse graph → neighbors are few → gate leans semantic when deg=0.
+            #
+            # For ATOMIC: structural is near-random (string entities, sparse graph).
+            #   Gate should learn alpha≈0 (mostly semantic from RoBERTa).
+            #   This happens naturally: structural_repr will be close to zero for
+            #   isolated entities, and the gate will learn to suppress it.
+            #
+            # NOTE: entity_ids here are *symbol* IDs (not ent2id indices).
+            # They index into symbol_emb which contains the LM-augmented embeddings.
+            if entity_ids is not None:
+                semantic_repr = self.symbol_emb(entity_ids)                        # [B, D]
+                semantic_repr = self.dropout(semantic_repr)
+            else:
+                # Fallback: use structural as semantic if no entity_ids provided
+                semantic_repr = structural_repr
+
+            gate_input = torch.cat((structural_repr, semantic_repr), dim=-1)       # [B, 2D]
             alpha      = torch.sigmoid(self.gate_layer(gate_input))                # [B, 1]
-            return alpha * structural_repr
+            return alpha * structural_repr + (1.0 - alpha) * semantic_repr         # [B, D]
 
     # ------------------------------------------------------------------
     def forward(self, query, support, query_meta=None, support_meta=None):
@@ -215,10 +226,10 @@ class EmbedMatcher(nn.Module):
         s_h_ids = support[:, 0]
         s_t_ids = support[:, 1]
 
-        # Derive query-relation direction from support head embeddings.
-        # This is the same proxy used in the original G-Matching paper.
+        # Query-relation direction from support head embeddings (same as G-Matching)
         query_rel_emb = self.symbol_emb(s_h_ids).mean(dim=0)   # [D]
 
+        # Pass entity_ids (symbol IDs) to neighbor_encoder for dual-branch gate
         query_left    = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids, query_rel_emb)
         query_right   = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids, query_rel_emb)
         support_left  = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids, query_rel_emb)
