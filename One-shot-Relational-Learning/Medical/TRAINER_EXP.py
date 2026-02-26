@@ -61,7 +61,7 @@ DATASET_CONFIGS = {
     'medical': {
         'step_size':    3000,
         'gate_mode':    'learned',
-        'margin':       3.0,
+        'margin':       1.0,
         'weight_cap':   5.0,
         'train_file':   'medical_object_only.train.jsonl',
         'val_file':     'medical_object_only.validation.jsonl',
