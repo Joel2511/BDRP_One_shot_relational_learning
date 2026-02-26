@@ -98,7 +98,7 @@ class Trainer(object):
 
         # --- OPTIMIZER: gate learns 10x slower ---
         m = self.matcher.module if isinstance(self.matcher, nn.DataParallel) else self.matcher
-        gate_params = list(m.gate_layer.parameters())
+        gate_params = []
         base_params = [p for n, p in m.named_parameters() if 'gate_layer' not in n]
         self.optim = optim.Adam([
             {'params': base_params, 'lr': self.lr},
