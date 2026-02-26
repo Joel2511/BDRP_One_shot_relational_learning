@@ -155,66 +155,54 @@ class Trainer(object):
         self.symbol2vec = None
 
     def load_embed(self):
+        symbol_id = {}
         rel2id = json.load(open(os.path.join(self.dataset, 'relation2ids')))
         ent2id = json.load(open(os.path.join(self.dataset, 'ent2ids')))
-
+    
+        for key in rel2id.keys():
+            symbol_id[key] = rel2id[key]
+        for key in ent2id.keys():
+            symbol_id[key] = ent2id[key] + len(rel2id)
+    
+        self.symbol2id = symbol_id
+        self.num_symbols = len(symbol_id)
+    
         logging.info('LOADING PRE-TRAINED EMBEDDING')
-        ent_embed = np.loadtxt(os.path.join(self.dataset, f'entity2vec.{self.embed_model}'))
-        rel_embed = np.loadtxt(os.path.join(self.dataset, f'relation2vec.{self.embed_model}'))
-
-        # Standardise
-        ent_embed = (ent_embed - ent_embed.mean()) / (ent_embed.std() + 1e-3)
-        rel_embed = (rel_embed - rel_embed.mean()) / (rel_embed.std() + 1e-3)
-        logging.info(f'Loaded {self.embed_model} as standard floats.')
-
-        # --- Semantic channel ---
+        ent_file = os.path.join(self.dataset, 'entity2vec.' + self.embed_model)
+        rel_file = os.path.join(self.dataset, 'relation2vec.' + self.embed_model)
+    
+        ent_embed = np.loadtxt(ent_file)
+        rel_embed = np.loadtxt(rel_file)
+    
+        # Standardize structural embeddings
+        ent_embed = (ent_embed - np.mean(ent_embed)) / (np.std(ent_embed) + 1e-3)
+        rel_embed = (rel_embed - np.mean(rel_embed)) / (np.std(rel_embed) + 1e-3)
+    
+        self.embed_dim = ent_embed.shape[1]
+    
+        # Store semantic separately (NO projection, NO concatenation)
+        self.semantic_matrix = None
         if getattr(self, 'use_semantic', False):
-            if self._is_medical:
-                sb_file = os.path.join(
-                    os.path.dirname(self.dataset),
-                    f'medical_{self.semantic_type}_anchors.npy'
-                )
-            else:
-                sb_file = os.path.join(
-                    os.path.dirname(self.dataset),
-                    f'{self.prefix}_anchors.npy'
-                )
-
+            sb_file = os.path.join(
+                os.path.dirname(self.dataset),
+                f'{self.prefix}_anchors.npy'
+            )
+    
             if os.path.exists(sb_file):
-                logging.info(f'Integrating semantic channel from {sb_file}')
+                logging.info(f'Loading semantic channel from {sb_file}')
                 sb = np.load(sb_file)
                 sb = (sb - sb.mean(axis=0, keepdims=True)) / (sb.std(axis=0, keepdims=True) + 1e-3)
-                if sb.shape[1] != ent_embed.shape[1]:
-                    rng  = np.random.RandomState(42)
-                    proj = rng.normal(0, 1.0 / np.sqrt(sb.shape[1]),
-                                      size=(sb.shape[1], ent_embed.shape[1]))
-                    sb = sb @ proj
-                ent_embed = np.concatenate([ent_embed, sb], axis=1)
-                rel_embed = np.concatenate([rel_embed,
-                                            np.zeros((rel_embed.shape[0], sb.shape[1]))], axis=1)
-                logging.info(f'Unified embedding dim: {ent_embed.shape[1]}')
+                self.semantic_matrix = sb  # keep raw 768d
             else:
                 logging.warning(f'Semantic .npy not found at {sb_file}')
-
-        # Build symbol table
-        symbol_id  = {}
-        embeddings = []
-        i = 0
-        for key in rel2id:
-            if key not in ['', 'OOV']:
-                symbol_id[self.escape_token(key)] = i
-                i += 1
-                embeddings.append(list(rel_embed[rel2id[key]]))
-        for key in ent2id:
-            if key not in ['', 'OOV']:
-                symbol_id[self.escape_token(key)] = i
-                i += 1
-                embeddings.append(list(ent_embed[ent2id[key]]))
-        symbol_id['PAD'] = i
-        embeddings.append(list(np.zeros(ent_embed.shape[1])))
-
-        self.symbol2id  = symbol_id
-        self.symbol2vec = np.array(embeddings)
+    
+        assert ent_embed.shape[0] == len(ent2id)
+        assert rel_embed.shape[0] == len(rel2id)
+    
+        # Combine structural only
+        rel_embed = np.concatenate([rel_embed, ent_embed], axis=0)
+        pad = np.zeros((1, self.embed_dim))
+        self.symbol2vec = np.concatenate([pad, rel_embed], axis=0)
 
     # ------------------------------------------------------------------
     # Connection matrix
