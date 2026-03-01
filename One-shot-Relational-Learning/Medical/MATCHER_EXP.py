@@ -73,7 +73,10 @@ class EmbedMatcher(nn.Module):
         ent_embeds = self.dropout(self.symbol_emb(entities))
     
         if entity_ids is not None:
-            center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
+            # --- CLAMP entity_ids to valid range ---
+            entity_ids_safe = entity_ids.clamp(0, self.num_symbols - 1)
+            center_embed = self.symbol_emb(entity_ids_safe).unsqueeze(1)
+    
             sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
             topk = min(self.knn_k, sim.size(1))
             topk_vals, topk_idx = torch.topk(sim, k=topk, dim=-1)
@@ -88,18 +91,21 @@ class EmbedMatcher(nn.Module):
         knn_mean = None
         if entity_ids is not None and self.knn_neighbors is not None:
             knn_idx = self.knn_neighbors[entity_ids].to(self.symbol_emb.weight.device)
-            knn_ent_embeds = self.dropout(self.symbol_emb(knn_idx))
+            # --- CLAMP knn_idx to valid range ---
+            knn_idx_safe = knn_idx.clamp(0, self.num_symbols - 1)
+            knn_ent_embeds = self.dropout(self.symbol_emb(knn_idx_safe))
     
-            center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
+            center_embed = self.symbol_emb(entity_ids_safe).unsqueeze(1)
             sim = F.cosine_similarity(center_embed, knn_ent_embeds, dim=-1)
             topk = min(self.knn_k, sim.size(1))
             topk_vals, topk_idx = torch.topk(sim, k=topk, dim=-1)
-            batch_idx = torch.arange(knn_idx.size(0), device=knn_idx.device).unsqueeze(1)
+            batch_idx = torch.arange(knn_idx_safe.size(0), device=knn_idx_safe.device).unsqueeze(1)
             knn_ent_embeds = knn_ent_embeds[batch_idx, topk_idx]
     
-            pad_tensor = torch.full_like(knn_idx, self.pad_idx, dtype=torch.long, device=self.symbol_emb.weight.device)
+            pad_tensor = torch.full_like(knn_idx_safe, self.pad_idx, dtype=torch.long,
+                                         device=self.symbol_emb.weight.device)
             knn_rel_embeds = self.dropout(self.symbol_emb(pad_tensor))
-            
+    
             concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
             out_knn = self.gcn_w(concat_knn)
             knn_mean = out_knn.mean(dim=1).tanh()
