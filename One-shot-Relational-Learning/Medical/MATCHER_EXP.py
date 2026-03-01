@@ -64,7 +64,7 @@ class EmbedMatcher(nn.Module):
         if knn_path is not None:
             self.load_knn_index(knn_path)
             
-   def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
+    def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
         relations = connections[:, :, 0].squeeze(-1)
         entities = connections[:, :, 1].squeeze(-1)
@@ -75,12 +75,12 @@ class EmbedMatcher(nn.Module):
         if entity_ids is not None:
             # 1️⃣ clamp input IDs
             entity_ids_safe = entity_ids.clamp(0, self.num_symbols - 1)
-    
             center_embed = self.symbol_emb(entity_ids_safe).unsqueeze(1)
     
             sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
             topk = min(self.knn_k, sim.size(1))
             topk_vals, topk_idx = torch.topk(sim, k=topk, dim=-1)
+            
             batch_idx = torch.arange(entities.size(0), device=entities.device).unsqueeze(1)
             rel_embeds = rel_embeds[batch_idx, topk_idx]
             ent_embeds = ent_embeds[batch_idx, topk_idx]
@@ -100,11 +100,16 @@ class EmbedMatcher(nn.Module):
             sim = F.cosine_similarity(center_embed, knn_ent_embeds, dim=-1)
             topk = min(self.knn_k, sim.size(1))
             topk_vals, topk_idx = torch.topk(sim, k=topk, dim=-1)
+            
             batch_idx = torch.arange(knn_idx_safe.size(0), device=knn_idx_safe.device).unsqueeze(1)
             knn_ent_embeds = knn_ent_embeds[batch_idx, topk_idx]
     
-            pad_tensor = torch.full_like(knn_idx_safe, self.pad_idx, dtype=torch.long,
-                                         device=self.symbol_emb.weight.device)
+            pad_tensor = torch.full_like(
+                knn_idx_safe, 
+                self.pad_idx, 
+                dtype=torch.long,
+                device=self.symbol_emb.weight.device
+            )
             knn_rel_embeds = self.dropout(self.symbol_emb(pad_tensor))
     
             concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
