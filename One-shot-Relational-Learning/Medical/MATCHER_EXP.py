@@ -14,7 +14,7 @@ class EmbedMatcher(nn.Module):
 
     def __init__(self, embed_dim, num_symbols, use_pretrain=True, embed=None,
                  dropout=0.2, batch_size=64, process_steps=4, finetune=False,
-                 aggregate='max', knn_k=32, knn_path=None, semantic_matrix=None):
+                 aggregate='max', knn_k=32, knn_path=None, semantic_matrix=None, object_only=False):
         super().__init__()
 
         self.embed_dim = embed_dim
