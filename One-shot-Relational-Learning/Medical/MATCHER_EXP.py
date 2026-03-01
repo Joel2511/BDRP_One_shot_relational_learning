@@ -44,7 +44,13 @@ class EmbedMatcher(nn.Module):
         # Load pre-trained embeddings if provided
         if use_pretrain and embed is not None:
             logging.info(f'LOADING {embed.shape[0]}x{embed.shape[1]} KB EMBEDDINGS')
-            self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
+            # Pad embeddings if necessary to match num_symbols
+            if embed.shape[0] < self.num_symbols:
+                padded_embed = np.zeros((self.num_symbols, embed.shape[1]), dtype=embed.dtype)
+                padded_embed[:embed.shape[0]] = embed
+            else:
+                padded_embed = embed
+            self.symbol_emb.weight.data.copy_(torch.from_numpy(padded_embed))
             if not finetune:
                 self.symbol_emb.weight.requires_grad = False
 
