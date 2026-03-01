@@ -23,6 +23,7 @@ class EmbedMatcher(nn.Module):
         self.batch_size = batch_size
         self.aggregate = aggregate
         self.knn_k = knn_k
+        self.object_only = object_only
 
         # Embeddings
         self.symbol_emb = nn.Embedding(num_symbols, embed_dim, padding_idx=self.pad_idx)
