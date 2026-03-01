@@ -64,7 +64,7 @@ class EmbedMatcher(nn.Module):
         if knn_path is not None:
             self.load_knn_index(knn_path)
             
-    def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
+   def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
         relations = connections[:, :, 0].squeeze(-1)
         entities = connections[:, :, 1].squeeze(-1)
@@ -73,8 +73,9 @@ class EmbedMatcher(nn.Module):
         ent_embeds = self.dropout(self.symbol_emb(entities))
     
         if entity_ids is not None:
-            # --- CLAMP entity_ids to valid range ---
+            # 1️⃣ clamp input IDs
             entity_ids_safe = entity_ids.clamp(0, self.num_symbols - 1)
+    
             center_embed = self.symbol_emb(entity_ids_safe).unsqueeze(1)
     
             sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
@@ -90,8 +91,8 @@ class EmbedMatcher(nn.Module):
     
         knn_mean = None
         if entity_ids is not None and self.knn_neighbors is not None:
-            knn_idx = self.knn_neighbors[entity_ids].to(self.symbol_emb.weight.device)
-            # --- CLAMP knn_idx to valid range ---
+            # 2️⃣ clamp kNN indices
+            knn_idx = self.knn_neighbors[entity_ids_safe].to(self.symbol_emb.weight.device)
             knn_idx_safe = knn_idx.clamp(0, self.num_symbols - 1)
             knn_ent_embeds = self.dropout(self.symbol_emb(knn_idx_safe))
     
