@@ -97,7 +97,8 @@ class Trainer(object):
         # --- OPTIMIZER: avoid duplicate params ---
         m = self.matcher.module if isinstance(self.matcher, nn.DataParallel) else self.matcher
         semantic_params = list(m.semantic_proj.parameters()) if hasattr(m, 'semantic_proj') and m.semantic_proj is not None else []
-        base_params = [p for p in m.parameters() if p not in semantic_params]
+        semantic_ids = set(id(p) for p in semantic_params)
+        base_params = [p for p in m.parameters() if id(p) not in semantic_ids]
         self.optim = optim.Adam([
             {'params': base_params, 'lr': self.lr},
             {'params': semantic_params, 'lr': self.lr * 0.1},
