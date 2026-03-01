@@ -63,8 +63,9 @@ class EmbedMatcher(nn.Module):
         relations = connections[:, :, 0]
         entities  = connections[:, :, 1]
 
-        rel_embeds = self.dropout(self.symbol_emb(relations))
-        ent_embeds = self.dropout(self.symbol_emb(entities))
+        # FIXED: use dropout_layer instead of float
+        rel_embeds = self.dropout_layer(self.symbol_emb(relations))
+        ent_embeds = self.dropout_layer(self.symbol_emb(entities))
 
         # Cosine-similarity-based topk neighbor filtering
         if entity_ids is not None:
@@ -83,7 +84,9 @@ class EmbedMatcher(nn.Module):
         knn_mean = None
         if entity_ids is not None and self.knn_neighbors is not None:
             knn_idx = self.knn_neighbors[entity_ids].to(self.symbol_emb.weight.device)
-            knn_ent_embeds = self.dropout(self.symbol_emb(knn_idx))
+
+            # FIXED: use dropout_layer
+            knn_ent_embeds = self.dropout_layer(self.symbol_emb(knn_idx))
 
             # Topk within knn neighbours
             center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
@@ -96,7 +99,9 @@ class EmbedMatcher(nn.Module):
             # Use pad embedding as pseudo-relation for knn branch
             pad_tensor    = torch.full_like(knn_idx, self.pad_idx, dtype=torch.long,
                                             device=self.symbol_emb.weight.device)
-            knn_rel_embeds = self.dropout(self.symbol_emb(pad_tensor))
+
+            # FIXED: use dropout_layer
+            knn_rel_embeds = self.dropout_layer(self.symbol_emb(pad_tensor))
 
             concat_knn = torch.cat((knn_rel_embeds, knn_ent_embeds), dim=-1)
             knn_mean   = (self.gcn_w(concat_knn) + self.gcn_b).mean(dim=1).tanh()
@@ -110,14 +115,13 @@ class EmbedMatcher(nn.Module):
 
     # ------------------------------------------------------------------
     def forward(self, query, support, query_meta=None, support_meta=None):
-    # --- Inject semantic projection into embedding table ---
+        # --- Inject semantic projection into embedding table ---
         if self.semantic_proj is not None and self.semantic_matrix is not None:
             device = self.symbol_emb.weight.device
             sem_tensor = torch.from_numpy(self.semantic_matrix).float().to(device)
             projected = self.semantic_proj(sem_tensor)
     
             # Add projected semantic to entity portion only
-            # Relations are first block, entities come after
             rel_count = projected.shape[0]
             self.symbol_emb.weight.data[1:rel_count+1] += projected
     
@@ -127,7 +131,6 @@ class EmbedMatcher(nn.Module):
             s_mean = s_emb.mean(dim=0, keepdim=True)
             return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
     
-        # Support both 4-tuple and 6-tuple meta (medical original used 6)
         if len(query_meta) == 6:
             q_l_conn, _, q_l_deg, q_r_conn, _, q_r_deg = query_meta
             s_l_conn, _, s_l_deg, s_r_conn, _, s_r_deg = support_meta
