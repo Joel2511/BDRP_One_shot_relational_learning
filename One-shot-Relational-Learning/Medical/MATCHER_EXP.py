@@ -64,8 +64,6 @@ class EmbedMatcher(nn.Module):
             self.load_knn_index(knn_path)
 
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
-        if entity_ids is not None:
-            print("DEBUG entity_ids min/max:", entity_ids.min().item(), entity_ids.max().item())
         num_neighbors = num_neighbors.unsqueeze(1).clamp(min=1)
         relations = connections[:, :, 0].squeeze(-1)
         entities = connections[:, :, 1].squeeze(-1)
