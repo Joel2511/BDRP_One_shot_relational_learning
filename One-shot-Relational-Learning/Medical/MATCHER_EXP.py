@@ -29,6 +29,11 @@ class EmbedMatcher(nn.Module):
         self.finetune = finetune
         self.semantic_matrix = semantic_matrix
     
+        # --- Safe defaults for kNN ---
+        self.knn_neighbors = None
+        self.knn_k = 0
+        self.pad_idx = 0  # if pad tensor is used in neighbor_encoder
+    
         self.symbol_emb = nn.Embedding(embed.shape[0], embed_dim, padding_idx=0)
     
         if use_pretrain:
@@ -45,7 +50,8 @@ class EmbedMatcher(nn.Module):
             semantic_dim = semantic_matrix.shape[1]
             self.semantic_proj = nn.Linear(semantic_dim, embed_dim, bias=False)
             nn.init.xavier_normal_(self.semantic_proj.weight)
-
+    
+    
     def _load_knn(self, knn_path):
         try:
             if knn_path.endswith('.pt') or knn_path.endswith('.pth'):
@@ -56,6 +62,9 @@ class EmbedMatcher(nn.Module):
             logging.info(f'Loaded k-NN neighbors: {self.knn_neighbors.shape}')
         except Exception as e:
             logging.error(f'Failed to load k-NN index from {knn_path}: {e}')
+            # fallback to safe defaults
+            self.knn_neighbors = None
+            self.knn_k = 0
 
     # ------------------------------------------------------------------
     def neighbor_encoder(self, connections, num_neighbors, entity_ids=None):
