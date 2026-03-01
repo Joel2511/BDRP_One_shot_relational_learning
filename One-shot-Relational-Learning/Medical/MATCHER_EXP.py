@@ -17,7 +17,7 @@ class EmbedMatcher(nn.Module):
     Otherwise pure structural GCN — same behaviour as both originals.
     """
 
-    def __init__(self, embed_dim, num_symbols, use_pretrain=True,
+   def __init__(self, embed_dim, num_symbols, use_pretrain=True,
              embed=None, dropout=0.2, batch_size=64,
              finetune=False, semantic_matrix=None):
 
@@ -43,6 +43,11 @@ class EmbedMatcher(nn.Module):
                 self.symbol_emb.weight.requires_grad = False
     
         self.dropout_layer = nn.Dropout(dropout)
+    
+        # --- GCN & gate layers required for neighbor_encoder ---
+        self.gcn_w = nn.Linear(embed_dim * 2, embed_dim)
+        self.gcn_b = nn.Parameter(torch.zeros(embed_dim))
+        self.gate_layer = nn.Linear(embed_dim * 2, embed_dim)
     
         # Learnable semantic projection (NEW)
         self.semantic_proj = None
