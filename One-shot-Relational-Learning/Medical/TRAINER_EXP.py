@@ -36,9 +36,8 @@ class Trainer(object):
             logging.warning("No CUDA found. Running on CPU.")
         torch.backends.cudnn.benchmark = True
 
-        self.meta      = not self.no_meta
+        self.meta = not self.no_meta
         self._is_medical = is_medical(self.prefix)
-        self._is_atomic  = is_atomic(self.prefix)
 
         # --- DATASET FILES ---
         if self._is_medical:
@@ -50,11 +49,8 @@ class Trainer(object):
                 self.train_file = 'medical_cleaned.train.jsonl'
                 self.val_file   = 'validation_tasks.json'
                 self.test_file  = 'test_tasks.json'
-        elif self._is_atomic:
-            self.train_file = 'train_tasks.json'
-            self.val_file   = 'dev_tasks.json'
-            self.test_file  = 'test_tasks.json'
         else:
+            # Atomic references removed; standard fallback for NELL/FB15k
             self.train_file = 'train_tasks.json'
             self.val_file   = 'validation_tasks.json'
             self.test_file  = 'test_tasks.json'
@@ -94,14 +90,21 @@ class Trainer(object):
             self.matcher = nn.DataParallel(self.matcher)
         self.matcher.to(self.device)
 
-        # --- OPTIMIZER: avoid duplicate params ---
+        # --- OPTIMIZER: FIXED ID-BASED FILTERING ---
+        # m.parameters() comparison by identity avoids the 768 vs 100 dimension clash
         m = self.matcher.module if isinstance(self.matcher, nn.DataParallel) else self.matcher
+        
         semantic_params = list(m.semantic_proj.parameters()) if hasattr(m, 'semantic_proj') and m.semantic_proj is not None else []
-        base_params = [p for p in m.parameters() if p not in semantic_params]
+        semantic_ids = set(id(p) for p in semantic_params)
+        
+        # Use memory IDs to filter base parameters. This is safe for NELL/FB15k
+        base_params = [p for p in m.parameters() if id(p) not in semantic_ids]
+        
         self.optim = optim.Adam([
             {'params': base_params, 'lr': self.lr},
             {'params': semantic_params, 'lr': self.lr * 0.1},
         ], weight_decay=self.weight_decay)
+        
         self.scheduler = optim.lr_scheduler.StepLR(self.optim, step_size=1000, gamma=0.5)
 
         # --- CONNECTION MATRIX ---
