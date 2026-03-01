@@ -28,6 +28,16 @@ class EmbedMatcher(nn.Module):
         self.symbol_emb = nn.Embedding(num_symbols, embed_dim, padding_idx=self.pad_idx)
         if use_pretrain and embed is not None:
             logging.info(f'LOADING {embed.shape[0]}x{embed.shape[1]} KB EMBEDDINGS')
+        
+            # --- DYNAMIC RESIZE START ---
+            if self.symbol_emb.weight.shape[0] != embed.shape[0]:
+                logging.info(f"RESIZING: {self.symbol_emb.weight.shape[0]} -> {embed.shape[0]}")
+                self.num_symbols = embed.shape[0]
+                # Update pad_idx to the new last index
+                self.pad_idx = self.num_symbols - 1 
+                self.symbol_emb = nn.Embedding(self.num_symbols, self.embed_dim, padding_idx=self.pad_idx)
+            # --- DYNAMIC RESIZE END ---
+        
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
                 self.symbol_emb.weight.requires_grad = False
