@@ -20,19 +20,22 @@ class EmbedMatcher(nn.Module):
         self.finetune = finetune
         self.semantic_matrix = semantic_matrix
         
-        # Determine num_symbols from the actual embed shape to avoid mismatches
-        self.num_symbols = embed.shape[0]
+        # --- RESEARCH-SAFE INITIALIZATION ---
+        # 1. Determine num_symbols from the actual incoming embed shape
+        # This handles the 16902 vs 16904 mismatch automatically for Medical.
+        self.num_symbols = embed.shape[0] if embed is not None else num_symbols
         self.pad_idx = self.num_symbols - 1
     
         self.symbol_emb = nn.Embedding(self.num_symbols, embed_dim, padding_idx=0)
     
-        if use_pretrain:
-            logging.info('LOADING KB EMBEDDINGS')
+        if use_pretrain and embed is not None:
+            logging.info(f'LOADING KB EMBEDDINGS: {embed.shape[0]}x{embed.shape[1]}')
+            # Copy pre-trained weights into the (potentially resized) table
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
                 self.symbol_emb.weight.requires_grad = False
     
-        # The actual dropout module
+        # The actual dropout module module
         self.dropout_layer = nn.Dropout(dropout)
     
         # Structural GCN components used in neighbor_encoder
@@ -40,20 +43,19 @@ class EmbedMatcher(nn.Module):
         self.gcn_b = nn.Parameter(torch.zeros(embed_dim))
         init.xavier_normal_(self.gcn_w.weight)
 
-        # Learnable semantic projection
+        # Learnable semantic projection (Semantic Anchor logic)
         self.semantic_proj = None
         if semantic_matrix is not None:
             semantic_dim = semantic_matrix.shape[1]
             self.semantic_proj = nn.Linear(semantic_dim, embed_dim, bias=False)
             nn.init.xavier_normal_(self.semantic_proj.weight)
 
-        # Encoders from modules.py
+        # Encoders from modules.py (LSTM Matching Logic)
         d_model = 2 * embed_dim
         self.support_encoder = SupportEncoder(d_model, 2*d_model, dropout)
-        # Assuming process_steps is 2 for baseline/NELL consistency
         self.query_encoder = QueryEncoder(d_model, 2)
 
-        # Internal state for k-NN
+        # Internal state for k-NN Distance Filter
         self.knn_neighbors = None
         self.knn_k = 32
 
@@ -62,15 +64,15 @@ class EmbedMatcher(nn.Module):
         relations = connections[:, :, 0]
         entities  = connections[:, :, 1]
 
-        # FIX: Use self.dropout_layer(...) instead of self.dropout(...)
+        # FIX: Correctly call the dropout layer module
         rel_embeds = self.dropout_layer(self.symbol_emb(relations))
         ent_embeds = self.dropout_layer(self.symbol_emb(entities))
 
-        # Cosine-similarity-based topk neighbor filtering (Distance Filter)
+        # --- DISTANCE FILTER ---
         if entity_ids is not None:
             center_embed = self.symbol_emb(entity_ids).unsqueeze(1)
             sim = F.cosine_similarity(center_embed, ent_embeds, dim=-1)
-            # Use self.knn_k or current neighbor count
+            # Prune bottom tier nodes based on geometric proximity
             topk = min(self.knn_k, sim.size(1))
             _, topk_idx = torch.topk(sim, k=topk, dim=-1)
             
@@ -78,22 +80,21 @@ class EmbedMatcher(nn.Module):
             rel_embeds = rel_embeds[batch_idx, topk_idx]
             ent_embeds = ent_embeds[batch_idx, topk_idx]
 
-        # Aggregation
+        # Aggregation of filtered neighbors
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1)
         structural_repr = (self.gcn_w(concat_embeds) + self.gcn_b).mean(dim=1).tanh()
 
         return structural_repr
 
     def forward(self, query, support, query_meta=None, support_meta=None):
-        # --- Semantic Integration (Addition) ---
+        # --- SEMANTIC ADDITION (Inductive Lifeline) ---
         if self.semantic_proj is not None and self.semantic_matrix is not None:
             device = self.symbol_emb.weight.device
             sem_tensor = torch.from_numpy(self.semantic_matrix).to(device).float()
             projected = self.semantic_proj(sem_tensor)
     
-            # Add projected semantic to entity portion (Indices 1 to N)
+            # Add semantic anchors to entity embeddings (Skip Relation block at index 0)
             rel_count = projected.shape[0]
-            # Safety check to avoid index overflow
             max_idx = min(rel_count + 1, self.symbol_emb.weight.shape[0])
             self.symbol_emb.weight.data[1:max_idx] += projected[:max_idx-1]
     
@@ -103,7 +104,7 @@ class EmbedMatcher(nn.Module):
             s_mean = s_emb.mean(dim=0, keepdim=True)
             return F.cosine_similarity(q_emb, s_mean.expand_as(q_emb))
     
-        # Meta handling (supports both medical 6-tuple and standard 4-tuple)
+        # Tuple handling for cross-dataset meta-data compatibility
         if len(query_meta) == 6:
             q_l_conn, _, q_l_deg, q_r_conn, _, q_r_deg = query_meta
             s_l_conn, _, s_l_deg, s_r_conn, _, s_r_deg = support_meta
@@ -114,20 +115,21 @@ class EmbedMatcher(nn.Module):
         q_h_ids, q_t_ids = query[:, 0], query[:, 1]
         s_h_ids, s_t_ids = support[:, 0], support[:, 1]
     
-        # Step 1: Filtered Neighbor Encoding
+        # Stage 1: Filtered Context Extraction
         query_left    = self.neighbor_encoder(q_l_conn, q_l_deg, q_h_ids)
         query_right   = self.neighbor_encoder(q_r_conn, q_r_deg, q_t_ids)
         support_left  = self.neighbor_encoder(s_l_conn, s_l_deg, s_h_ids)
         support_right = self.neighbor_encoder(s_r_conn, s_r_deg, s_t_ids)
     
-        # Step 2: LSTM Matching
+        # Stage 2: Concatenation and LSTM Refinement
         query_neighbor = torch.cat((query_left, query_right), dim=-1)
         support_neighbor = torch.cat((support_left, support_right), dim=-1)
     
+        # Process through G-Matching Matcher (LSTM)
         support_g = torch.mean(self.support_encoder(support_neighbor.unsqueeze(0)), dim=1)
         query_g = self.support_encoder(query_neighbor.unsqueeze(1)).squeeze(1)
     
-        # Step 3: Normalization and Score
+        # Stage 3: Induction and Similarity Scoring
         query_f = F.normalize(self.query_encoder(support_g.squeeze(0), query_g), p=2, dim=-1)
         support_g = F.normalize(support_g.squeeze(0), p=2, dim=-1)
     
