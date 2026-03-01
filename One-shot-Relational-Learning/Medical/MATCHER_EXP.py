@@ -113,7 +113,7 @@ class EmbedMatcher(nn.Module):
     # --- Inject semantic projection into embedding table ---
         if self.semantic_proj is not None and self.semantic_matrix is not None:
             device = self.symbol_emb.weight.device
-            sem_tensor = torch.from_numpy(self.semantic_matrix).to(device)
+            sem_tensor = torch.from_numpy(self.semantic_matrix).float().to(device)
             projected = self.semantic_proj(sem_tensor)
     
             # Add projected semantic to entity portion only
