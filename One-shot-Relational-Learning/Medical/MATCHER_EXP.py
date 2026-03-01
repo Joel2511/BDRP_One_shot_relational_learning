@@ -17,45 +17,44 @@ class EmbedMatcher(nn.Module):
     Otherwise pure structural GCN — same behaviour as both originals.
     """
 
-   def __init__(self, embed_dim, num_symbols, use_pretrain=True,
-             embed=None, dropout=0.2, batch_size=64,
-             finetune=False, semantic_matrix=None):
+    def __init__(self, embed_dim, num_symbols, use_pretrain=True,
+                 embed=None, dropout=0.2, batch_size=64,
+                 finetune=False, semantic_matrix=None):
 
         super(EmbedMatcher, self).__init__()
-    
+
         self.actual_dim = embed_dim
         self.dropout = dropout
         self.batch_size = batch_size
         self.finetune = finetune
         self.semantic_matrix = semantic_matrix
-    
+
         # --- Safe defaults for kNN ---
         self.knn_neighbors = None
         self.knn_k = 0
         self.pad_idx = 0  # if pad tensor is used in neighbor_encoder
-    
+
         self.symbol_emb = nn.Embedding(embed.shape[0], embed_dim, padding_idx=0)
-    
+
         if use_pretrain:
             logging.info('LOADING KB EMBEDDINGS')
             self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
             if not finetune:
                 self.symbol_emb.weight.requires_grad = False
-    
+
         self.dropout_layer = nn.Dropout(dropout)
-    
+
         # --- GCN & gate layers required for neighbor_encoder ---
         self.gcn_w = nn.Linear(embed_dim * 2, embed_dim)
         self.gcn_b = nn.Parameter(torch.zeros(embed_dim))
         self.gate_layer = nn.Linear(embed_dim * 2, embed_dim)
-    
+
         # Learnable semantic projection (NEW)
         self.semantic_proj = None
         if semantic_matrix is not None:
             semantic_dim = semantic_matrix.shape[1]
             self.semantic_proj = nn.Linear(semantic_dim, embed_dim, bias=False)
             nn.init.xavier_normal_(self.semantic_proj.weight)
-    
     
     def _load_knn(self, knn_path):
         try:
