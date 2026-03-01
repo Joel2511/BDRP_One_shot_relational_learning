@@ -80,16 +80,27 @@ class Trainer(object):
         self.pad_id      = self.num_symbols
 
         # --- MATCHER ---
-        self.matcher = EmbedMatcher(
-            embed_dim=self.embed_dim,
-            num_symbols=self.num_symbols,
-            use_pretrain=True,
-            embed=self.symbol2vec,
-            dropout=self.dropout,
-            batch_size=self.batch_size,
-            finetune=self.fine_tune,
-            semantic_matrix=self.semantic_matrix if self._is_medical else None
-        )
+        matcher_args = {
+            "embed_dim": self.embed_dim,
+            "num_symbols": self.num_symbols,
+            "use_pretrain": True,
+            "embed": self.symbol2vec,
+            "dropout": self.dropout,
+            "batch_size": self.batch_size,
+            "finetune": self.fine_tune,
+            "process_steps": self.process_steps
+        }
+
+        # 2. Inject Medical-only properties 
+        if self._is_medical:
+            matcher_args["semantic_matrix"] = self.semantic_matrix
+            # getattr ensures it won't crash if --object_only is missing [cite: 11]
+            matcher_args["object_only"] = getattr(self, 'object_only', False)
+
+        # 3. Initialize ONLY ONCE 
+        self.matcher = EmbedMatcher(**matcher_args)
+
+        # 4. Handle Multi-GPU and Device movement 
         if torch.cuda.device_count() > 1:
             self.matcher = nn.DataParallel(self.matcher)
         self.matcher.to(self.device)
